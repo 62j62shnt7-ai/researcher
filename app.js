@@ -24,6 +24,7 @@
   function initElements() {
     elements.apiKeyInput = document.getElementById('api-key-input');
     elements.cloudUrlInput = document.getElementById('cloud-url-input');
+    elements.btnFetchCloud = document.getElementById('btn-fetch-cloud');
     elements.btnSaveKey = document.getElementById('btn-save-key');
     elements.btnTestKey = document.getElementById('btn-test-key');
     elements.btnSettings = document.getElementById('btn-settings');
@@ -180,7 +181,6 @@
   async function fetchRepoKB() {
     const targetUrl = state.cloudUrl || 'knowledge_base.json';
     try {
-      // Check if targetUrl is a Google Drive folder link
       const driveMatch = targetUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
       if (driveMatch) {
         const folderId = driveMatch[1];
@@ -200,25 +200,45 @@
     }
   }
 
-  async function loadGoogleDriveFolder(folderId) {
-    if (!folderId) return;
-    try {
-      let files = [];
-      if (state.apiKey) {
-        const apiUrl = `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+trashed%3Dfalse&fields=files(id%2Cname%2CmimeType)&key=${state.apiKey}`;
-        const res = await fetch(apiUrl);
-        if (res.ok) {
-          const data = await res.json();
-          files = data.files || [];
-        }
+  async function loadGoogleDriveFolder(folderId, statusCallback) {
+    if (!folderId) return 0;
+    const updateStatus = (msg, isErr = false) => {
+      if (statusCallback) statusCallback(msg, isErr);
+      else if (elements.settingsStatus) {
+        elements.settingsStatus.className = isErr ? 'status-msg error' : 'status-msg';
+        elements.settingsStatus.textContent = msg;
+        elements.settingsStatus.classList.remove('hidden');
       }
+    };
+
+    if (!state.apiKey) {
+      updateStatus('⚠️ Please enter your API Key above first to access Google Drive.', true);
+      return 0;
+    }
+
+    updateStatus('🔄 Querying Google Drive folder contents...');
+    try {
+      const apiUrl = `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+trashed%3Dfalse&fields=files(id%2Cname%2CmimeType)&key=${state.apiKey}`;
+      const res = await fetch(apiUrl);
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error?.message || `HTTP ${res.status}`);
+      }
+
+      const data = await res.json();
+      const files = data.files || [];
 
       if (files.length === 0) {
-        console.warn('Google Drive folder query returned no files or API Key needed.');
-        return;
+        updateStatus('⚠️ Google Drive folder is empty or not shared as "Anyone with the link can view".', true);
+        return 0;
       }
 
-      for (const file of files) {
+      updateStatus(`📥 Found ${files.length} file(s). Downloading & parsing PDF codes...`);
+      let successCount = 0;
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        updateStatus(`📥 Parsing (${i + 1}/${files.length}): ${file.name}...`);
         const downloadUrl = `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&key=${state.apiKey}`;
         try {
           const fileRes = await fetch(downloadUrl);
@@ -226,6 +246,7 @@
             const blob = await fileRes.blob();
             const fileObj = new File([blob], file.name, { type: file.mimeType });
             await processUploadedFile(fileObj);
+            successCount++;
           }
         } catch (err) {
           console.warn(`Could not download drive file ${file.name}:`, err);
@@ -234,8 +255,11 @@
 
       updateLibraryUI();
       populateDocScopeSelect();
+      updateStatus(`✅ Successfully imported ${successCount} document(s) from Google Drive!`);
+      return successCount;
     } catch (e) {
-      console.warn('Error loading Google Drive folder:', e);
+      updateStatus(`❌ Google Drive Fetch Failed: ${e.message}. Ensure folder is shared as "Anyone with link".`, true);
+      return 0;
     }
   }
 
@@ -400,7 +424,6 @@ If the context does not contain enough information, state what is known and clar
       allChunks = allChunks.concat(state.localChunks || []);
     }
 
-    // Filter chunks by selected document scope if not 'all'
     if (docScope && docScope !== 'all') {
       allChunks = allChunks.filter(c => c.file === docScope || c.docId === docScope);
     }
@@ -634,6 +657,30 @@ If the context does not contain enough information, state what is known and clar
           elements.settingsModal.classList.add('hidden');
         });
       }
+    }
+
+    if (elements.btnFetchCloud) {
+      elements.btnFetchCloud.addEventListener('click', async () => {
+        const cloudUrl = elements.cloudUrlInput ? elements.cloudUrlInput.value.trim() : '';
+        state.apiKey = elements.apiKeyInput.value.trim();
+        state.cloudUrl = cloudUrl;
+        localStorage.setItem('gemini_api_key', state.apiKey);
+        localStorage.setItem('cloud_storage_url', cloudUrl);
+
+        if (!cloudUrl) {
+          elements.settingsStatus.className = 'status-msg error';
+          elements.settingsStatus.textContent = 'Please enter a Google Drive folder link or cloud URL.';
+          elements.settingsStatus.classList.remove('hidden');
+          return;
+        }
+
+        const driveMatch = cloudUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+        if (driveMatch) {
+          await loadGoogleDriveFolder(driveMatch[1]);
+        } else {
+          await fetchRepoKB();
+        }
+      });
     }
 
     if (elements.btnSaveKey) {
@@ -893,7 +940,7 @@ If the context does not contain enough information, state what is known and clar
       await discoverUserModels(state.apiKey);
     }
     setupEventListeners();
-    console.log('Researcher AI Web App initialized with Cloud Storage & Document Scope Selector.');
+    console.log('Researcher AI Web App initialized with Cloud Fetch button & Drive parser.');
   }
 
   window.addEventListener('DOMContentLoaded', init);

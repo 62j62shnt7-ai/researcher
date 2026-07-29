@@ -136,7 +136,10 @@
           </div>
           <div class="form-group" style="margin-top: 1rem;">
             <label for="cloud-url-input">Google Drive Folder or Cloud Link</label>
-            <input type="url" id="cloud-url-input" placeholder="https://drive.google.com/drive/folders/1A2B3C4D..." autocomplete="off">
+            <div style="display: flex; gap: 0.5rem;">
+              <input type="url" id="cloud-url-input" placeholder="https://drive.google.com/drive/folders/1A2B3C4D..." autocomplete="off" style="flex: 1;">
+              <button id="btn-fetch-cloud" class="btn btn-secondary" type="button">🔄 Fetch Drive</button>
+            </div>
             <small>Paste any public Google Drive folder link or cloud storage URL.</small>
           </div>
           <div id="settings-status" class="status-msg hidden"></div>
@@ -176,6 +179,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=1.0.5"></script>
+  <script src="app.js?v=1.0.6"></script>
 </body>
 </html>
