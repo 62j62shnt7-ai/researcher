@@ -103,33 +103,45 @@ def chunk_text(pages, filename, max_chars=800, overlap=100):
             
     return chunks
 
-def fetch_gemini_embedding(text, api_key):
+def discover_embedding_model(api_key):
     if not api_key:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            models = data.get("models", [])
+            for m in models:
+                m_name = m.get("name", "")
+                methods = m.get("supportedGenerationMethods", [])
+                if "embedContent" in methods:
+                    clean_name = m_name.replace("models/", "")
+                    print(f"Discovered working embedding model for your key: {clean_name}")
+                    return clean_name
+    except Exception as e:
+        print(f"Could not query models list: {e}")
+        
+    return "text-embedding-004"
+
+def fetch_gemini_embedding(text, api_key, model_name):
+    if not api_key or not model_name:
         return []
         
-    models_to_try = ["text-embedding-004", "embedding-001"]
-    
-    for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:embedContent?key={api_key}"
-        payload = {
-            "content": {
-                "parts": [{"text": text[:2000]}]
-            }
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:embedContent?key={api_key}"
+    payload = {
+        "content": {
+            "parts": [{"text": text[:2000]}]
         }
-        data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req) as resp:
-                res_json = json.loads(resp.read().decode('utf-8'))
-                vals = res_json.get("embedding", {}).get("values", [])
-                if vals:
-                    return vals
-        except urllib.error.HTTPError as http_err:
-            print(f"Gemini embedding ({model_name}) HTTP Error {http_err.code}: {http_err.reason}")
-        except Exception as e:
-            print(f"Gemini embedding ({model_name}) error: {e}")
-            
-    return []
+    }
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            res_json = json.loads(resp.read().decode('utf-8'))
+            return res_json.get("embedding", {}).get("values", [])
+    except Exception as e:
+        return []
 
 def build_knowledge_base():
     codes_dir = Path("codes")
@@ -137,7 +149,10 @@ def build_knowledge_base():
     out_dir.mkdir(exist_ok=True)
     
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    
+    working_embed_model = None
+    if api_key:
+        working_embed_model = discover_embedding_model(api_key)
+        
     if not codes_dir.exists():
         print("No codes/ directory found. Creating empty codes/ directory...")
         codes_dir.mkdir(exist_ok=True)
@@ -149,6 +164,7 @@ def build_knowledge_base():
     
     documents_meta = []
     all_chunks = []
+    embedding_failed_count = 0
     
     for file_path in all_files:
         filename = file_path.name
@@ -171,11 +187,16 @@ def build_knowledge_base():
         })
         
         for c in doc_chunks:
-            if api_key:
-                print(f"Attempting embedding for chunk {c['id']}...")
-                vec = fetch_gemini_embedding(c["text"], api_key)
+            if api_key and working_embed_model:
+                vec = fetch_gemini_embedding(c["text"], api_key, working_embed_model)
                 if vec:
                     c["embedding"] = vec
+                else:
+                    embedding_failed_count += 1
+                    if embedding_failed_count > 3:
+                        # Disable embedding attempts for remaining chunks to finish build super fast
+                        working_embed_model = None
+                        print("Embedding calls failing on key. Disabling embedding for remaining chunks (falling back to BM25).")
             all_chunks.append(c)
             
     kb_data = {
