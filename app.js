@@ -187,7 +187,7 @@
   async function fetchRepoKB() {
     const targetUrl = state.cloudUrl || 'knowledge_base.json';
     try {
-      if (targetUrl.includes('drive.google.com') || targetUrl.match(/\/folders\//) || targetUrl.match(/\/file\/d\//)) {
+      if (targetUrl.includes('drive.google.com') || targetUrl.includes('dropbox.com') || targetUrl.includes('onedrive.live.com') || targetUrl.includes('1drv.ms') || targetUrl.match(/\/folders\//)) {
         return;
       }
 
@@ -203,7 +203,7 @@
     }
   }
 
-  // --- Fetch Direct PDF URL or Google Drive Share Link ---
+  // --- Fetch Direct PDF URL or Dropbox / OneDrive / Drive Share Link ---
   async function fetchDirectPdfUrl(urlInput) {
     if (!urlInput) return false;
     const updateStatus = (msg, isErr = false) => {
@@ -224,33 +224,30 @@
     const driveMatch = urlInput.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || urlInput.match(/id=([a-zA-Z0-9_-]+)/);
 
     if (urlInput.toLowerCase().includes('dropbox.com')) {
-      downloadUrl = urlInput.replace('www.dropbox.com', 'dl.dropboxusercontent.com').replace('?dl=0', '?raw=1');
-      if (!downloadUrl.includes('raw=1') && !downloadUrl.includes('dl=1')) {
-        downloadUrl += (downloadUrl.includes('?') ? '&raw=1' : '?raw=1');
+      downloadUrl = urlInput.replace('www.dropbox.com', 'dl.dropboxusercontent.com').replace('?dl=0', '?dl=1');
+      if (!downloadUrl.includes('dl=1') && !downloadUrl.includes('raw=1')) {
+        downloadUrl += (downloadUrl.includes('?') ? '&dl=1' : '?dl=1');
       }
       const urlParts = urlInput.split('/');
       const lastPart = urlParts[urlParts.length - 1].split('?')[0];
       if (lastPart && lastPart.toLowerCase().endsWith('.pdf')) {
         filename = decodeURIComponent(lastPart);
       } else {
-        filename = 'Dropbox_Code.pdf';
+        filename = 'Dropbox_Folder.zip';
       }
     } else if (urlInput.toLowerCase().includes('onedrive.live.com') || urlInput.toLowerCase().includes('1drv.ms')) {
       downloadUrl = urlInput.replace('/redir?', '/download?').replace('/embed?', '/download?');
-      filename = 'OneDrive_Code.pdf';
+      if (!downloadUrl.includes('download')) {
+        downloadUrl += (downloadUrl.includes('?') ? '&download=1' : '?download=1');
+      }
+      filename = 'OneDrive_Folder.zip';
     } else if (driveMatch) {
       const fileId = driveMatch[1];
       downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
       filename = `Google_Drive_Code_${fileId.substring(0, 6)}.pdf`;
-    } else {
-      const urlParts = downloadUrl.split('/');
-      const lastPart = urlParts[urlParts.length - 1].split('?')[0];
-      if (lastPart && lastPart.toLowerCase().endsWith('.pdf')) {
-        filename = lastPart;
-      }
     }
 
-    updateStatus(`📥 Downloading & parsing ${filename}...`);
+    updateStatus(`📥 Fetching cloud link content...`);
 
     const fetchUrls = [
       downloadUrl,
@@ -264,6 +261,29 @@
         if (res.ok) {
           const blob = await res.blob();
           if (blob.size > 500) {
+            const isZip = blob.type.includes('zip') || blob.type.includes('compressed') || filename.endsWith('.zip');
+            if (isZip && window.JSZip) {
+              updateStatus(`📦 Unpacking folder ZIP archive...`);
+              const zip = await JSZip.loadAsync(blob);
+              let importedCount = 0;
+              for (const zipPath of Object.keys(zip.files)) {
+                const entry = zip.files[zipPath];
+                if (!entry.dir && (entry.name.toLowerCase().endsWith('.pdf') || entry.name.toLowerCase().endsWith('.docx'))) {
+                  const entryBlob = await entry.async('blob');
+                  const entryName = entry.name.split('/').pop();
+                  const fileObj = new File([entryBlob], entryName, { type: 'application/pdf' });
+                  await processUploadedFile(fileObj);
+                  importedCount++;
+                }
+              }
+              if (importedCount > 0) {
+                updateLibraryUI();
+                populateDocScopeSelect();
+                updateStatus(`✅ Successfully imported ${importedCount} code(s) from folder archive!`);
+                return true;
+              }
+            }
+
             const fileObj = new File([blob], filename, { type: 'application/pdf' });
             const docMeta = await processUploadedFile(fileObj);
             updateLibraryUI();
@@ -277,7 +297,7 @@
       }
     }
 
-    updateStatus(`❌ Could not download PDF from URL. Please use the "Upload Code" button to pick the PDF directly from your device.`, true);
+    updateStatus(`❌ Could not fetch cloud link. Please check link sharing settings or use "Upload Code" button to pick PDFs directly.`, true);
     return false;
   }
 
@@ -292,16 +312,12 @@
       }
     };
 
+    if (urlOrId.includes('dropbox.com') || urlOrId.includes('onedrive.live.com') || urlOrId.includes('1drv.ms') || urlOrId.includes('/file/d/') || urlOrId.endsWith('.pdf')) {
+      return await fetchDirectPdfUrl(urlOrId);
+    }
+
     updateStatus('🔄 Scanning Google Drive link(s)...');
     const fileMap = new Map();
-
-    const directFileMatches = Array.from(urlOrId.matchAll(/\/file\/d\/([a-zA-Z0-9_-]{25,50})/g));
-    if (directFileMatches.length > 0) {
-      directFileMatches.forEach((m, idx) => {
-        const fileId = m[1];
-        fileMap.set(fileId, `Google_Drive_Code_${idx + 1}.pdf`);
-      });
-    }
 
     const folderMatches = Array.from(urlOrId.matchAll(/\/folders\/([a-zA-Z0-9_-]{25,50})/g));
     let folderIds = folderMatches.map(m => m[1]);
@@ -344,13 +360,7 @@
     const fileList = Array.from(fileMap.entries()).map(([id, name]) => ({ id, name }));
 
     if (fileList.length === 0) {
-      if (urlOrId.includes('/file/d/') || urlOrId.endsWith('.pdf')) {
-        return await fetchDirectPdfUrl(urlOrId);
-      }
-
-      updateStatus('⚠️ Could not auto-detect files in folder link. Use "Upload Code" button or paste direct file share links.', true);
-      if (elements.driveFilesContainer) elements.driveFilesContainer.classList.add('hidden');
-      return [];
+      return await fetchDirectPdfUrl(urlOrId);
     }
 
     state.fetchedDriveFiles = fileList;
@@ -829,7 +839,7 @@ If the context does not contain enough information, state what is known and clar
 
         if (!cloudUrl) {
           elements.settingsStatus.className = 'status-msg error';
-          elements.settingsStatus.textContent = 'Please enter a Google Drive link or PDF URL.';
+          elements.settingsStatus.textContent = 'Please enter a cloud share link or PDF URL.';
           elements.settingsStatus.classList.remove('hidden');
           return;
         }
@@ -1113,7 +1123,7 @@ If the context does not contain enough information, state what is known and clar
     if (state.apiKey) {
       discoverUserModels(state.apiKey);
     }
-    console.log('Researcher AI Web App initialized with Direct PDF & Google Drive URL Loader.');
+    console.log('Researcher AI Web App initialized with Automatic ZIP Unpacker & Multi-Cloud Loader.');
   }
 
   window.addEventListener('DOMContentLoaded', init);
