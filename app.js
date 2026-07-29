@@ -940,6 +940,14 @@ If the context does not contain enough information, state what is known and clar
       });
     }
 
+    if (elements.chatModelSelect) {
+      elements.chatModelSelect.addEventListener('change', () => {
+        state.model = elements.chatModelSelect.value;
+        localStorage.setItem('gemini_model', state.model);
+      });
+    }
+
+
 
     if (elements.settingsModal) {
       const closeBtn = elements.settingsModal.querySelector('.modal-close');
@@ -1096,9 +1104,15 @@ If the context does not contain enough information, state what is known and clar
         }
 
         if (chatStatus) {
+          if (workingChatModel) {
+            state.model = workingChatModel;
+            localStorage.setItem('gemini_model', workingChatModel);
+            if (elements.chatModelSelect) elements.chatModelSelect.value = workingChatModel;
+          }
           elements.settingsStatus.className = 'status-msg success';
           elements.settingsStatus.textContent = `✔️ Chat Ready (${workingChatModel}) | ${embedStatus ? `✔️ Embedder Ready (${workingEmbedModel})` : '⚠️ Keyword-Only Retrieval'}`;
         } else {
+
           elements.settingsStatus.className = 'status-msg error';
           elements.settingsStatus.textContent = `❌ API Error: ${apiErr || 'Invalid API Key or network blocked'}. Please check your key at aistudio.google.com.`;
         }
