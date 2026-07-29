@@ -682,6 +682,16 @@ If the context does not contain enough information, state what is known and clar
       }
     }
 
+    // Compute vector embeddings for uploaded document chunks
+    console.log(`Computing vector embeddings for ${chunks.length} uploaded chunk(s)...`);
+    for (const chunk of chunks) {
+      try {
+        chunk.embedding = await fetchQueryEmbedding(chunk.text);
+      } catch (e) {
+        console.warn(`Vector embedding failed for chunk ${chunk.id}:`, e);
+      }
+    }
+
     const docMeta = {
       id: docId,
       filename,
@@ -693,6 +703,7 @@ If the context does not contain enough information, state what is known and clar
     await saveLocalDocument(docMeta, chunks);
     return docMeta;
   }
+
 
   async function parsePdfFile(file) {
     const arrayBuffer = await file.arrayBuffer();
