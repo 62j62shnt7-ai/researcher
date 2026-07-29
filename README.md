@@ -7,7 +7,7 @@ A serverless, mobile-optimized web application powered by **Google Gemini AI** a
 ## 🌟 Key Features
 
 - 📱 **Mobile-First & Serverless**: Hosted on **GitHub Pages** for free. Works directly on any phone or desktop browser with zero server setup or hosting fees.
-- ⚙️ **Powered by Google Gemini**: Connects directly to `gemini-2.5-flash` / `gemini-1.5-flash` for high-speed technical Q&A, and `text-embedding-004` for semantic search.
+- ⚙️ **Powered by Google Gemini**: Connects directly to `gemini-1.5-flash` / `gemini-2.0-flash` for high-speed technical Q&A, and `text-embedding-004` for semantic search.
 - ⚡ **Dual Document Management**:
   1. **GitHub Repository Library (`codes/`)**: Place PDFs in the `codes/` directory. GitHub Actions automatically parses, chunks, and indexes them using Python on GitHub's cloud servers.
   2. **Direct Mobile Uploads**: Upload PDFs, Word (`.docx`), or TXT files directly on your phone via the web app interface. Indexed locally on your device in **IndexedDB**.

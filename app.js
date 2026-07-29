@@ -9,7 +9,7 @@
   // Global State
   const state = {
     apiKey: localStorage.getItem('gemini_api_key') || '',
-    model: localStorage.getItem('gemini_model') || 'gemini-2.5-flash',
+    model: localStorage.getItem('gemini_model') || 'gemini-1.5-flash',
     repoKB: { documents: [], chunks: [] },
     localDocs: [],
     localChunks: [],
@@ -218,7 +218,7 @@
       throw new Error('Please set your Gemini API key in Settings first.');
     }
 
-    const modelsToTry = [state.model || 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+    const modelsToTry = [state.model || 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'];
     let lastError = null;
 
     let contextText = '';
@@ -534,7 +534,7 @@ If the context does not contain enough information, state what is known and clar
       let embedStatus = false;
 
       // Test Chat Endpoint
-      const chatModels = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+      const chatModels = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'];
       let workingChatModel = '';
 
       for (const cm of chatModels) {
