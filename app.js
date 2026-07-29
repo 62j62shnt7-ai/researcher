@@ -78,33 +78,50 @@
 
   // --- Dynamic Model Discovery ---
   async function discoverUserModels(apiKey) {
-    if (!apiKey) return;
+    if (!apiKey) return [];
     try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
-      const res = await fetch(url);
-      if (res.ok) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models`;
+      let res = await fetch(url, {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }
+      }).catch(() => null);
+
+      let models = [];
+      if (res && res.ok) {
         const data = await res.json();
-        const models = data.models || [];
-        const generateModels = models.filter(m => m.supportedGenerationMethods?.includes('generateContent'));
-        if (generateModels.length > 0 && elements.modelSelect) {
-          const currentVal = elements.modelSelect.value;
-          elements.modelSelect.innerHTML = '';
-          generateModels.forEach(m => {
-            const modelId = m.name.replace('models/', '');
-            const opt = document.createElement('option');
-            opt.value = modelId;
-            opt.textContent = `${m.displayName || modelId}`;
-            if (modelId === currentVal || modelId === state.model || (modelId.includes('1.5-flash') && !elements.modelSelect.value)) {
-              opt.selected = true;
-            }
-            elements.modelSelect.appendChild(opt);
-          });
+        models = data.models || [];
+      } else {
+        res = await fetch(`${url}?key=${apiKey}`).catch(() => null);
+        if (res && res.ok) {
+          const data = await res.json();
+          models = data.models || [];
         }
       }
+
+      const generateModels = models.filter(m => m.supportedGenerationMethods?.includes('generateContent'));
+      const selectEl = elements.chatModelSelect || document.getElementById('chat-model-select');
+
+      if (generateModels.length > 0 && selectEl) {
+        const currentVal = state.model || selectEl.value;
+        selectEl.innerHTML = '';
+        generateModels.forEach(m => {
+          const modelId = m.name.replace('models/', '');
+          const opt = document.createElement('option');
+          opt.value = modelId;
+          opt.textContent = `${m.displayName || modelId} (${modelId})`;
+          if (modelId === currentVal || modelId === state.model || (modelId === 'gemini-2.0-flash' && !selectEl.value)) {
+            opt.selected = true;
+          }
+          selectEl.appendChild(opt);
+        });
+      }
+      return generateModels.map(m => m.name.replace('models/', ''));
     } catch (e) {
       console.warn('Could not auto-discover models:', e);
+      return [];
     }
   }
+
 
   // --- IndexedDB Local Storage ---
   function initIndexedDB() {
@@ -1004,37 +1021,51 @@ If the context does not contain enough information, state what is known and clar
         elements.settingsStatus.textContent = 'Discovering models for your account...';
         elements.settingsStatus.classList.remove('hidden');
 
-        await discoverUserModels(testKey);
+        const discovered = await discoverUserModels(testKey);
+        let apiErr = '';
 
         let chatStatus = false;
         let embedStatus = false;
 
         const chatModels = [
+          ...discovered,
           elements.chatModelSelect?.value,
           state.model,
           'gemini-2.0-flash',
           'gemini-1.5-flash',
-          'gemini-1.5-pro',
-          'gemini-2.0-flash-lite'
+          'gemini-1.5-pro'
         ].filter((m, i, arr) => m && arr.indexOf(m) === i);
         let workingChatModel = '';
 
         for (const cm of chatModels) {
           try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${cm}:generateContent`;
-            const res = await fetch(url, {
+            let res = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'x-goog-api-key': testKey },
               body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Ping' }] }] })
             });
+
+            if (!res.ok) {
+              res = await fetch(`${url}?key=${testKey}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Ping' }] }] })
+              });
+            }
+
             if (res.ok) {
               chatStatus = true;
               workingChatModel = cm;
               break;
+            } else {
+              const errData = await res.json().catch(() => ({}));
+              apiErr = errData.error?.message || `HTTP ${res.status}`;
             }
-          } catch (e) {}
+          } catch (e) {
+            apiErr = e.message;
+          }
         }
-
 
         const embedModels = ['gemini-embedding-2', 'text-embedding-004'];
         let workingEmbedModel = '';
@@ -1042,11 +1073,20 @@ If the context does not contain enough information, state what is known and clar
         for (const em of embedModels) {
           try {
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${em}:embedContent`;
-            const res = await fetch(url, {
+            let res = await fetch(url, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'x-goog-api-key': testKey },
               body: JSON.stringify({ model: `models/${em}`, content: { parts: [{ text: 'Ping' }] } })
             });
+
+            if (!res.ok) {
+              res = await fetch(`${url}?key=${testKey}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: `models/${em}`, content: { parts: [{ text: 'Ping' }] } })
+              });
+            }
+
             if (res.ok) {
               embedStatus = true;
               workingEmbedModel = em;
@@ -1055,16 +1095,16 @@ If the context does not contain enough information, state what is known and clar
           } catch (e) {}
         }
 
-
         if (chatStatus) {
           elements.settingsStatus.className = 'status-msg success';
           elements.settingsStatus.textContent = `✔️ Chat Ready (${workingChatModel}) | ${embedStatus ? `✔️ Embedder Ready (${workingEmbedModel})` : '⚠️ Keyword-Only Retrieval'}`;
         } else {
           elements.settingsStatus.className = 'status-msg error';
-          elements.settingsStatus.textContent = '❌ Invalid API Key or network blocked. Please check your key at aistudio.google.com.';
+          elements.settingsStatus.textContent = `❌ API Error: ${apiErr || 'Invalid API Key or network blocked'}. Please check your key at aistudio.google.com.`;
         }
       });
     }
+
 
     if (elements.btnLibrary) {
       elements.btnLibrary.addEventListener('click', () => {
