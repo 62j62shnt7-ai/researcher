@@ -36,6 +36,7 @@
     elements.btnSettings = document.getElementById('btn-settings');
     elements.settingsModal = document.getElementById('settings-modal');
     elements.settingsStatus = document.getElementById('settings-status');
+    elements.btnClearChat = document.getElementById('btn-clear-chat');
     elements.btnUpload = document.getElementById('btn-upload');
     elements.fileInput = document.getElementById('file-input');
     elements.btnLibrary = document.getElementById('btn-library');
@@ -1030,6 +1031,26 @@ If the context does not contain enough information, state what is known and clar
     if (elements.closeResultsBtn) {
       elements.closeResultsBtn.addEventListener('click', () => {
         elements.searchResultsSection.classList.add('hidden');
+      });
+    }
+
+    if (elements.btnClearChat) {
+      elements.btnClearChat.addEventListener('click', () => {
+        if (elements.chatMessages) {
+          elements.chatMessages.innerHTML = '';
+          renderMessage('assistant', '⚡ **New Chat Session Started.** Ask any engineering question or select a specific code from the dropdown below.');
+        }
+      });
+    }
+
+    if (elements.chatInput) {
+      elements.chatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+          e.preventDefault();
+          if (elements.chatForm) {
+            elements.chatForm.requestSubmit ? elements.chatForm.requestSubmit() : elements.chatForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+          }
+        }
       });
     }
 
