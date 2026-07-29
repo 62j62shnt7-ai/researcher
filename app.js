@@ -59,6 +59,35 @@
     }
   }
 
+  // --- Dynamic Model Discovery ---
+  async function discoverUserModels(apiKey) {
+    if (!apiKey) return;
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        const models = data.models || [];
+        const generateModels = models.filter(m => m.supportedGenerationMethods?.includes('generateContent'));
+        if (generateModels.length > 0 && elements.modelSelect) {
+          elements.modelSelect.innerHTML = '';
+          generateModels.forEach(m => {
+            const modelId = m.name.replace('models/', '');
+            const opt = document.createElement('option');
+            opt.value = modelId;
+            opt.textContent = `${m.displayName || modelId}`;
+            if (modelId === state.model || (modelId.includes('1.5-flash') && !elements.modelSelect.value)) {
+              opt.selected = true;
+            }
+            elements.modelSelect.appendChild(opt);
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Could not auto-discover models:', e);
+    }
+  }
+
   // --- IndexedDB Local Storage ---
   function initIndexedDB() {
     return new Promise((resolve, reject) => {
@@ -218,7 +247,8 @@
       throw new Error('Please set your Gemini API key in Settings first.');
     }
 
-    const modelsToTry = [state.model || 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'];
+    const selected = elements.modelSelect ? elements.modelSelect.value : state.model;
+    const modelsToTry = [selected, 'gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-pro'].filter(Boolean);
     let lastError = null;
 
     let contextText = '';
@@ -506,11 +536,12 @@ If the context does not contain enough information, state what is known and clar
       elements.settingsModal.classList.add('hidden');
     });
 
-    elements.btnSaveKey.addEventListener('click', () => {
+    elements.btnSaveKey.addEventListener('click', async () => {
       state.apiKey = elements.apiKeyInput.value.trim();
       localStorage.setItem('gemini_api_key', state.apiKey);
+      await discoverUserModels(state.apiKey);
       elements.settingsStatus.className = 'status-msg success';
-      elements.settingsStatus.textContent = 'API Key saved successfully!';
+      elements.settingsStatus.textContent = 'API Key saved! Discovered available models.';
       elements.settingsStatus.classList.remove('hidden');
       setTimeout(() => {
         elements.settingsModal.classList.add('hidden');
@@ -527,14 +558,15 @@ If the context does not contain enough information, state what is known and clar
         return;
       }
       elements.settingsStatus.className = 'status-msg';
-      elements.settingsStatus.textContent = 'Testing connection to Gemini AI...';
+      elements.settingsStatus.textContent = 'Discovering models for your account...';
       elements.settingsStatus.classList.remove('hidden');
+
+      await discoverUserModels(testKey);
 
       let chatStatus = false;
       let embedStatus = false;
 
-      // Test Chat Endpoint
-      const chatModels = ['gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'];
+      const chatModels = [elements.modelSelect?.value, 'gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-pro'].filter(Boolean);
       let workingChatModel = '';
 
       for (const cm of chatModels) {
@@ -553,7 +585,6 @@ If the context does not contain enough information, state what is known and clar
         } catch (e) {}
       }
 
-      // Test Embeddings Endpoint
       const embedModels = ['text-embedding-004', 'embedding-001'];
       let workingEmbedModel = '';
 
@@ -707,7 +738,7 @@ If the context does not contain enough information, state what is known and clar
         const text = await file.text();
         const data = JSON.parse(text);
         if (data.documents && data.chunks) {
-          for (const doc of data.documents) {
+          for (const doc) {
             const docChunks = data.chunks.filter((c) => c.docId === doc.id || c.file === doc.filename);
             await saveLocalDocument(doc, docChunks);
           }
@@ -723,6 +754,9 @@ If the context does not contain enough information, state what is known and clar
   async function init() {
     await initIndexedDB();
     await fetchRepoKB();
+    if (state.apiKey) {
+      await discoverUserModels(state.apiKey);
+    }
     setupEventListeners();
     console.log('Researcher AI Web App initialized.');
   }
