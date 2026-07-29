@@ -154,9 +154,15 @@
         <div class="modal-body">
           <div class="form-group">
             <label for="api-key-input">Gemini API Key</label>
-            <input type="password" id="api-key-input" placeholder="AIzaSy..." autocomplete="off">
-            <small>Stored locally in your browser. Get free key at aistudio.google.com.</small>
+            <div style="display: flex; gap: 0.5rem; margin-top: 0.25rem;">
+              <input type="password" id="api-key-input" placeholder="AIzaSy..." autocomplete="off" style="flex: 1;">
+              <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" style="display: inline-flex; align-items: center; gap: 0.25rem; text-decoration: none; font-size: 0.85rem; padding: 0.4rem 0.75rem; white-space: nowrap; border-radius: 6px; background: #334155; color: #f8fafc; font-weight: 500;">
+                🔑 Get Key
+              </a>
+            </div>
+            <small style="display: block; margin-top: 0.25rem; color: #94a3b8;">Stored locally in your browser. Click <strong>Get Key</strong> to generate a free API key at Google AI Studio.</small>
           </div>
+
           <div class="form-group" style="margin-top: 1rem;">
             <label for="chat-model-select">Gemini Chat Model</label>
             <select id="chat-model-select" style="width:100%; padding:0.5rem; border-radius:6px; background:var(--bg-dark, #1e293b); color:var(--text-main, #f8fafc); border:1px solid var(--border-color, #334155); margin-top:0.25rem;">
