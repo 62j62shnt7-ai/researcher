@@ -237,57 +237,89 @@
     const folderMatch = urlOrId.match(/\/folders\/([a-zA-Z0-9_-]+)/) || [null, urlOrId];
     const folderId = folderMatch[1] || urlOrId;
 
-    updateStatus('🔄 Querying Google Drive public folder view...');
+    updateStatus('🔄 Querying Google Drive public folder...');
 
-    const embedUrl = `https://corsproxy.io/?https://drive.google.com/embeddedfolderview?id=${folderId}`;
-    try {
-      const res = await fetch(embedUrl);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const htmlText = await res.text();
+    let htmlText = '';
+    const proxyUrls = [
+      `https://corsproxy.io/?https://drive.google.com/drive/folders/${folderId}`,
+      `https://api.allorigins.win/raw?url=${encodeURIComponent('https://drive.google.com/drive/folders/' + folderId)}`,
+      `https://corsproxy.io/?https://drive.google.com/embeddedfolderview?id=${folderId}`
+    ];
 
-      // Extract file IDs and names from public folderview HTML
-      const matches = Array.from(htmlText.matchAll(/class="drive-viewer-entry"[^>]*id="entry-([^"]+)"[^>]*>[\s\S]*?<div class="drive-viewer-entry-title">([^<]+)<\/div>/g));
-      
-      let fileList = matches.map(m => ({ id: m[1], name: m[2] }));
-
-      if (fileList.length === 0) {
-        const idMatches = Array.from(htmlText.matchAll(/id="entry-([a-zA-Z0-9_-]+)"/g));
-        fileList = idMatches.map((m, idx) => ({ id: m[1], name: `Drive_Doc_${idx + 1}.pdf` }));
-      }
-
-      if (fileList.length === 0) {
-        updateStatus('⚠️ Could not parse files in Google Drive folder. Ensure folder is set to "Anyone with the link can view".', true);
-        return 0;
-      }
-
-      updateStatus(`📥 Found ${fileList.length} document(s). Downloading & indexing...`);
-      let successCount = 0;
-
-      for (let i = 0; i < fileList.length; i++) {
-        const item = fileList[i];
-        updateStatus(`📥 Parsing (${i + 1}/${fileList.length}): ${item.name}...`);
-        const downloadUrl = `https://corsproxy.io/?https://drive.google.com/uc?export=download&id=${item.id}`;
-        try {
-          const fileRes = await fetch(downloadUrl);
-          if (fileRes.ok) {
-            const blob = await fileRes.blob();
-            const fileObj = new File([blob], item.name, { type: 'application/pdf' });
-            await processUploadedFile(fileObj);
-            successCount++;
+    for (const pUrl of proxyUrls) {
+      try {
+        const res = await fetch(pUrl);
+        if (res.ok) {
+          const txt = await res.text();
+          if (txt && txt.length > 500) {
+            htmlText += '\n' + txt;
           }
-        } catch (err) {
-          console.warn(`Could not download file ${item.name}:`, err);
         }
-      }
+      } catch (e) {}
+    }
 
-      updateLibraryUI();
-      populateDocScopeSelect();
-      updateStatus(`✅ Successfully imported ${successCount} document(s) from Google Drive!`);
-      return successCount;
-    } catch (e) {
-      updateStatus(`❌ Could not fetch Google Drive folder. Check folder link sharing settings.`, true);
+    const fileMap = new Map();
+
+    // Pattern A: Match ["FILE_ID", "filename.pdf", ...]
+    const jsonMatches = Array.from(htmlText.matchAll(/\["([a-zA-Z0-9_-]{25,50})",\s*"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx))"/gi));
+    jsonMatches.forEach(m => {
+      if (m[1] && m[2]) fileMap.set(m[1], m[2]);
+    });
+
+    // Pattern B: Match /file/d/FILE_ID
+    const fileLinkMatches = Array.from(htmlText.matchAll(/\/file\/d\/([a-zA-Z0-9_-]{25,50})/g));
+    fileLinkMatches.forEach((m) => {
+      if (m[1] && !fileMap.has(m[1])) {
+        fileMap.set(m[1], `Drive_PDF_${fileMap.size + 1}.pdf`);
+      }
+    });
+
+    // Pattern C: Match id="entry-FILE_ID"
+    const entryMatches = Array.from(htmlText.matchAll(/id="entry-([a-zA-Z0-9_-]{25,50})"/g));
+    entryMatches.forEach((m) => {
+      if (m[1] && !fileMap.has(m[1])) {
+        fileMap.set(m[1], `Drive_Doc_${fileMap.size + 1}.pdf`);
+      }
+    });
+
+    const fileList = Array.from(fileMap.entries()).map(([id, name]) => ({ id, name }));
+
+    if (fileList.length === 0) {
+      updateStatus('⚠️ Could not parse files in Google Drive folder. Ensure folder is shared as "Anyone with link can view".', true);
       return 0;
     }
+
+    updateStatus(`📥 Found ${fileList.length} document(s). Downloading & indexing...`);
+    let successCount = 0;
+
+    for (let i = 0; i < fileList.length; i++) {
+      const item = fileList[i];
+      updateStatus(`📥 Parsing (${i + 1}/${fileList.length}): ${item.name}...`);
+      const downloadUrls = [
+        `https://corsproxy.io/?https://drive.google.com/uc?export=download&id=${item.id}`,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent('https://drive.google.com/uc?export=download&id=' + item.id)}`
+      ];
+
+      for (const dUrl of downloadUrls) {
+        try {
+          const fileRes = await fetch(dUrl);
+          if (fileRes.ok) {
+            const blob = await fileRes.blob();
+            if (blob.size > 500) {
+              const fileObj = new File([blob], item.name, { type: 'application/pdf' });
+              await processUploadedFile(fileObj);
+              successCount++;
+              break;
+            }
+          }
+        } catch (err) {}
+      }
+    }
+
+    updateLibraryUI();
+    populateDocScopeSelect();
+    updateStatus(`✅ Successfully imported ${successCount} document(s) from Google Drive!`);
+    return successCount;
   }
 
   // --- Populate Code Scope Selector Dropdown ---
