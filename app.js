@@ -641,11 +641,9 @@ If the context does not contain enough information, state what is known and clar
       }
     }
 
-    }
-
     throw lastError || new Error('Failed to communicate with Gemini API.');
-
   }
+
 
   // --- Hybrid Retriever (Filtered by Document Scope) ---
   async function performHybridSearch(query, topK = 5, docScope = 'all') {
