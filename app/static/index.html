@@ -327,13 +327,14 @@ async function refreshDocs(){
     else if(d.status==='ready_keyword_only'){badge='keyword only';cls='b-kw';}
     else if(d.status==='error'){badge='error';cls='b-err';}
     else {badge=d.status+'…';cls='b-busy';processing=true;}
-    const meta = (d.chunk_count ? `${d.chunk_count} chunks${d.pages?` · ${d.pages} pp`:''}` : (d.format||''))
-               + (d.collection ? ` · 🏷 ${esc(d.collection)}` : '');
+    const busyHtml = (d.status === 'parsing' || d.status === 'embedding') ?
+      `<div style="font-size:11px;color:#3b82f6;margin-top:3px;display:flex;align-items:center;gap:6px;"><span class="spinner" style="display:inline-block;width:10px;height:10px;border:2px solid #3b82f6;border-top-color:transparent;border-radius:50%;animation:spin 0.8s linear infinite;"></span> ${d.status==='embedding'?'⚡ Computing vector embeddings…':'📄 Parsing document pages…'}</div>` : '';
     const errHtml = d.error ? `<div style="font-size:11px;color:${d.status==='error'?'var(--bad)':'var(--warn)'};margin-top:3px;cursor:pointer" onclick="alert('Document details:\\n\\n' + ${JSON.stringify(d.error)})" title="Click to view full error message">⚠️ ${esc(d.error)}</div>` : '';
     div.innerHTML = `<input type="checkbox" title="Include in chat" ${docSel[d.id]?'checked':''} onchange="toggleSel(${d.id}, this.checked)">
       <div style="flex:1;min-width:0">
         <div class="name" title="${esc(d.filename)}">${esc(d.filename)}</div>
-        <div class="meta">${meta}${errHtml}</div></div>
+        <div class="meta">${meta}${busyHtml}${errHtml}</div></div>
+
       <span class="badge ${cls}" style="cursor:${d.error?'pointer':'default'}" onclick="if(${JSON.stringify(d.error||'')}) alert('Document details:\\n\\n' + ${JSON.stringify(d.error)})" title="${d.error?'Click for details':badge}">${badge}</span>
       <button title="Set collection/project" onclick="setDocCollection(${d.id})">🏷</button>
       <button title="Re-index" onclick="reindexDoc(${d.id})">↻</button>

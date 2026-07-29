@@ -682,15 +682,45 @@ If the context does not contain enough information, state what is known and clar
       }
     }
 
-    // Compute vector embeddings for uploaded document chunks
-    console.log(`Computing vector embeddings for ${chunks.length} uploaded chunk(s)...`);
-    for (const chunk of chunks) {
+    // Compute vector embeddings for uploaded document chunks with live progress indicator
+    const progressBanner = document.getElementById('embedding-progress-banner');
+    const progressStatusMsg = document.getElementById('progress-status-msg');
+    const progressPercent = document.getElementById('progress-percent');
+    const progressBarFill = document.getElementById('progress-bar-fill');
+
+    if (progressBanner) {
+      progressBanner.classList.remove('hidden');
+      if (progressStatusMsg) progressStatusMsg.textContent = `⚡ Preparing vector embeddings for ${filename}...`;
+      if (progressPercent) progressPercent.textContent = `0%`;
+      if (progressBarFill) progressBarFill.style.width = `0%`;
+    }
+
+    const totalChunks = chunks.length;
+    for (let idx = 0; idx < totalChunks; idx++) {
+      const chunk = chunks[idx];
+      const percent = Math.round(((idx + 1) / totalChunks) * 100);
+      if (progressStatusMsg) {
+        progressStatusMsg.textContent = `⚡ Computing vector embeddings: ${idx + 1} of ${totalChunks} chunks (${filename})`;
+      }
+      if (progressPercent) progressPercent.textContent = `${percent}%`;
+      if (progressBarFill) progressBarFill.style.width = `${percent}%`;
+
       try {
         chunk.embedding = await fetchQueryEmbedding(chunk.text);
       } catch (e) {
         console.warn(`Vector embedding failed for chunk ${chunk.id}:`, e);
       }
     }
+
+    if (progressBanner) {
+      if (progressStatusMsg) progressStatusMsg.textContent = `✔️ Vector embeddings complete for ${filename}!`;
+      if (progressPercent) progressPercent.textContent = `100%`;
+      if (progressBarFill) progressBarFill.style.width = `100%`;
+      setTimeout(() => {
+        progressBanner.classList.add('hidden');
+      }, 2500);
+    }
+
 
     const docMeta = {
       id: docId,
