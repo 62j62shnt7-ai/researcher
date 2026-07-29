@@ -25,7 +25,9 @@
   function initElements() {
     elements.apiKeyInput = document.getElementById('api-key-input');
     elements.chatModelSelect = document.getElementById('chat-model-select');
+    elements.modelSelect = document.getElementById('model-select');
     elements.embeddingEngineSelect = document.getElementById('embedding-engine-select');
+
 
     elements.cloudUrlInput = document.getElementById('cloud-url-input');
 
@@ -99,23 +101,31 @@
       }
 
       const generateModels = models.filter(m => m.supportedGenerationMethods?.includes('generateContent'));
-      const selectEl = elements.chatModelSelect || document.getElementById('chat-model-select');
+      const selectElements = [
+        elements.chatModelSelect,
+        elements.modelSelect,
+        document.getElementById('chat-model-select'),
+        document.getElementById('model-select')
+      ].filter((el, idx, self) => el && self.indexOf(el) === idx);
 
-      if (generateModels.length > 0 && selectEl) {
-        const currentVal = state.model || selectEl.value;
-        selectEl.innerHTML = '';
-        generateModels.forEach(m => {
-          const modelId = m.name.replace('models/', '');
-          const opt = document.createElement('option');
-          opt.value = modelId;
-          opt.textContent = `${m.displayName || modelId} (${modelId})`;
-          if (modelId === currentVal || modelId === state.model || (modelId === 'gemini-2.0-flash' && !selectEl.value)) {
-            opt.selected = true;
-          }
-          selectEl.appendChild(opt);
+      if (generateModels.length > 0 && selectElements.length > 0) {
+        const currentVal = state.model || (elements.chatModelSelect ? elements.chatModelSelect.value : '');
+        selectElements.forEach(selectEl => {
+          selectEl.innerHTML = '';
+          generateModels.forEach(m => {
+            const modelId = m.name.replace('models/', '');
+            const opt = document.createElement('option');
+            opt.value = modelId;
+            opt.textContent = `${m.displayName || modelId}`;
+            if (modelId === currentVal || modelId === state.model || (modelId === 'gemini-2.0-flash' && !currentVal)) {
+              opt.selected = true;
+            }
+            selectEl.appendChild(opt);
+          });
         });
       }
       return generateModels.map(m => m.name.replace('models/', ''));
+
     } catch (e) {
       console.warn('Could not auto-discover models:', e);
       return [];
@@ -940,12 +950,21 @@ If the context does not contain enough information, state what is known and clar
       });
     }
 
+    const syncModelChange = (val) => {
+      if (!val) return;
+      state.model = val;
+      localStorage.setItem('gemini_model', val);
+      if (elements.chatModelSelect) elements.chatModelSelect.value = val;
+      if (elements.modelSelect) elements.modelSelect.value = val;
+    };
+
     if (elements.chatModelSelect) {
-      elements.chatModelSelect.addEventListener('change', () => {
-        state.model = elements.chatModelSelect.value;
-        localStorage.setItem('gemini_model', state.model);
-      });
+      elements.chatModelSelect.addEventListener('change', (e) => syncModelChange(e.target.value));
     }
+    if (elements.modelSelect) {
+      elements.modelSelect.addEventListener('change', (e) => syncModelChange(e.target.value));
+    }
+
 
 
 
