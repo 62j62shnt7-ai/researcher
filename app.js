@@ -569,13 +569,14 @@ If the context does not contain enough information, state what is known and clar
     };
 
     for (const modelName of modelsToTry) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${state.apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
       try {
         const res = await fetch(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
           body: JSON.stringify(body)
         });
+
 
         if (res.ok) {
           const data = await res.json();
@@ -1008,15 +1009,22 @@ If the context does not contain enough information, state what is known and clar
         let chatStatus = false;
         let embedStatus = false;
 
-        const chatModels = [elements.modelSelect?.value, 'gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-pro'].filter(Boolean);
+        const chatModels = [
+          elements.chatModelSelect?.value,
+          state.model,
+          'gemini-2.0-flash',
+          'gemini-1.5-flash',
+          'gemini-1.5-pro',
+          'gemini-2.0-flash-lite'
+        ].filter((m, i, arr) => m && arr.indexOf(m) === i);
         let workingChatModel = '';
 
         for (const cm of chatModels) {
           try {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${cm}:generateContent?key=${testKey}`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${cm}:generateContent`;
             const res = await fetch(url, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: { 'Content-Type': 'application/json', 'x-goog-api-key': testKey },
               body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Ping' }] }] })
             });
             if (res.ok) {
@@ -1026,6 +1034,7 @@ If the context does not contain enough information, state what is known and clar
             }
           } catch (e) {}
         }
+
 
         const embedModels = ['gemini-embedding-2', 'text-embedding-004'];
         let workingEmbedModel = '';
