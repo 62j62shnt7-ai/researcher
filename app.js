@@ -102,14 +102,9 @@
         }
       }
 
+      const generateModels = models.filter(m => m.supportedGenerationMethods?.includes('generateContent'));
       const generateModelNames = generateModels.map(m => m.name.replace('models/', ''));
       state.discoveredModels = generateModelNames;
-
-      // If current saved model is not in discovered models or deprecated, default to first active model
-      if (generateModelNames.length > 0 && !generateModelNames.includes(state.model)) {
-        state.model = generateModelNames.includes('gemini-2.0-flash') ? 'gemini-2.0-flash' : generateModelNames[0];
-        localStorage.setItem('gemini_model', state.model);
-      }
 
       const selectElements = [
         elements.chatModelSelect,
@@ -119,6 +114,11 @@
       ].filter((el, idx, self) => el && self.indexOf(el) === idx);
 
       if (generateModels.length > 0 && selectElements.length > 0) {
+        if (!generateModelNames.includes(state.model)) {
+          state.model = generateModelNames[0];
+          localStorage.setItem('gemini_model', state.model);
+        }
+
         selectElements.forEach(selectEl => {
           selectEl.innerHTML = '';
           generateModels.forEach(m => {
@@ -132,15 +132,18 @@
             selectEl.appendChild(opt);
           });
         });
+      } else if (selectElements.length > 0) {
+        selectElements.forEach(selectEl => {
+          selectEl.innerHTML = '<option value="">❌ No generateContent models found for this key</option>';
+        });
       }
       return generateModelNames;
-
-
     } catch (e) {
       console.warn('Could not auto-discover models:', e);
       return [];
     }
   }
+
 
 
   // --- IndexedDB Local Storage ---
@@ -571,9 +574,14 @@
       throw new Error('Please set your Gemini API key in Settings first.');
     }
 
-    const selectedModel = (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value) || state.model || 'gemini-2.0-flash';
-    const fallbackList = (state.discoveredModels && state.discoveredModels.length > 0) ? state.discoveredModels : ['gemini-2.0-flash', 'gemini-2.5-flash'];
+    const selectedModel = (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value) || state.model;
+    const fallbackList = (state.discoveredModels && state.discoveredModels.length > 0) ? state.discoveredModels : [];
     const modelsToTry = [selectedModel, ...fallbackList].filter((m, i, arr) => m && arr.indexOf(m) === i);
+
+    if (modelsToTry.length === 0) {
+      throw new Error('No models discovered for your Gemini API Key. Please open Settings and click Save / Test Connection.');
+    }
+
 
 
     let lastError = null;
@@ -1071,11 +1079,9 @@ If the context does not contain enough information, state what is known and clar
           ...discovered,
           elements.chatModelSelect?.value,
           elements.modelSelect?.value,
-          state.model,
-          'gemini-2.0-flash',
-          'gemini-2.5-flash',
-          'gemini-1.5-flash'
+          state.model
         ].filter((m, i, arr) => m && arr.indexOf(m) === i);
+
 
         let workingChatModel = '';
 
