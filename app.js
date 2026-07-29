@@ -235,6 +235,9 @@
       } else {
         filename = 'Dropbox_Code.pdf';
       }
+    } else if (urlInput.toLowerCase().includes('onedrive.live.com') || urlInput.toLowerCase().includes('1drv.ms')) {
+      downloadUrl = urlInput.replace('/redir?', '/download?').replace('/embed?', '/download?');
+      filename = 'OneDrive_Code.pdf';
     } else if (driveMatch) {
       const fileId = driveMatch[1];
       downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
