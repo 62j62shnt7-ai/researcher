@@ -16,6 +16,8 @@ def stream_chat(messages: list[dict], cfg: dict):
     provider = cfg.get("provider", "openai-compatible")
     if provider == "anthropic":
         yield from _stream_anthropic(messages, cfg)
+    elif provider == "gemini":
+        yield from _stream_gemini(messages, cfg)
     else:
         yield from _stream_openai(messages, cfg)
 
@@ -106,6 +108,62 @@ def _stream_anthropic(messages: list[dict], cfg: dict):
         raise ProviderError(f"Anthropic request failed: {e}") from e
 
 
+def _stream_gemini(messages: list[dict], cfg: dict):
+    api_key = cfg.get("api_key", "")
+    if not api_key:
+        raise ProviderError("Google Gemini provider requires an API key. Open Settings.")
+    model = cfg.get("model") or "gemini-1.5-flash"
+    base = (cfg.get("base_url") or "https://generativelanguage.googleapis.com").rstrip("/")
+    if base.endswith("/v1beta") or base.endswith("/v1"):
+        base = base.rsplit("/", 1)[0]
+
+    system_text = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+    contents = []
+    for m in messages:
+        if m["role"] == "system":
+            continue
+        role = "model" if m["role"] == "assistant" else "user"
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+
+    payload = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": cfg.get("temperature", 0.2),
+            "maxOutputTokens": cfg.get("max_tokens", 3000),
+        }
+    }
+    if system_text:
+        payload["systemInstruction"] = {"parts": [{"text": system_text}]}
+
+    url = f"{base}/v1beta/models/{model}:streamGenerateContent?alt=sse&key={api_key}"
+    headers = {"Content-Type": "application/json"}
+
+    try:
+        with httpx.Client(timeout=httpx.Timeout(300, connect=15)) as client:
+            with client.stream("POST", url, json=payload, headers=headers) as r:
+                if r.status_code >= 400:
+                    body = r.read().decode("utf-8", errors="replace")[:500]
+                    raise ProviderError(f"Gemini API returned {r.status_code}: {body}")
+                for line in r.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if not data_str:
+                        continue
+                    try:
+                        obj = json.loads(data_str)
+                        candidates = obj.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            for p in parts:
+                                if "text" in p:
+                                    yield p["text"]
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+    except httpx.HTTPError as e:
+        raise ProviderError(f"Gemini request failed: {e}") from e
+
+
 def complete(messages: list[dict], cfg: dict, max_tokens: int = 300) -> str:
     """Non-streaming convenience call (used for query rewriting)."""
     c = dict(cfg)
@@ -124,8 +182,25 @@ def test_connection(cfg: dict) -> dict:
             return {"ok": True, "models": [
                 "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"
             ]}
+        if provider == "gemini":
+            api_key = cfg.get("api_key", "")
+            if not api_key:
+                return {"ok": False, "error": "API key required for Gemini"}
+            base = (cfg.get("base_url") or "https://generativelanguage.googleapis.com").rstrip("/")
+            if base.endswith("/v1beta") or base.endswith("/v1"):
+                base = base.rsplit("/", 1)[0]
+            url = f"{base}/v1beta/models?key={api_key}"
+            with httpx.Client(timeout=15) as client:
+                r = client.get(url)
+                if r.status_code >= 400:
+                    return {"ok": False, "error": f"Gemini API error: {r.status_code}"}
+                data = r.json()
+                models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])
+                          if "generateContent" in m.get("supportedGenerationMethods", [])]
+                return {"ok": True, "models": models or ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]}
         from .embeddings import list_models
         models = list_models(cfg.get("base_url", ""), cfg.get("api_key", ""))
         return {"ok": True, "models": models}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+

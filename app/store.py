@@ -147,6 +147,16 @@ def delete_document(doc_id: int):
         c.execute("DELETE FROM documents WHERE id=?", (doc_id,))
         c.commit()
         _invalidate_vec_cache()
+def clear_all_documents():
+    with _lock:
+        c = get_conn()
+        c.execute("DELETE FROM vectors")
+        c.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+        c.execute("DELETE FROM chunks")
+        c.execute("DELETE FROM documents")
+        c.commit()
+        _invalidate_vec_cache()
+
 
 
 def clear_chunks(doc_id: int):

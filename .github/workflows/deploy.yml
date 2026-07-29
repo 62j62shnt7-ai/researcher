@@ -37,9 +37,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pypdf pdfplumber python-docx openpyxl
+          pip install pypdf pdfplumber python-docx openpyxl fastembed
 
-      - name: Build Knowledge Base Index with Gemini
+      - name: Build Knowledge Base Index (Free FastEmbed + Gemini)
+
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |

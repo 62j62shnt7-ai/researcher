@@ -63,8 +63,14 @@ def _index_document(doc_id: int):
         chunk_ids = store.add_chunks(doc_id, chunks)
         store.set_doc_meta(doc_id, pages=pages, chunk_count=len(chunks))
 
-        ecfg = cfg["embeddings"]
+        ecfg = dict(cfg["embeddings"])
+        if ecfg.get("provider") != "local" and cfg.get("chat", {}).get("provider") == "gemini":
+            ecfg["provider"] = "gemini"
+            if not ecfg.get("api_key"):
+                ecfg["api_key"] = cfg.get("chat", {}).get("api_key", "")
+
         if ecfg.get("enabled", True):
+
             store.set_status(doc_id, "embedding")
             try:
                 embs = embed_in_batches(
@@ -79,7 +85,11 @@ def _index_document(doc_id: int):
         else:
             store.set_status(doc_id, "ready_keyword_only")
     except Exception as e:
-        store.set_status(doc_id, "error", f"{type(e).__name__}: {e}")
+        import traceback
+        err_msg = f"{type(e).__name__}: {e}"
+        print(f"Indexing error for doc {doc_id}:\n{traceback.format_exc()}")
+        store.set_status(doc_id, "error", err_msg)
+
 
 
 def _index_async(doc_id: int):
@@ -183,6 +193,21 @@ def delete_document(doc_id: int):
     return {"ok": True}
 
 
+@app.delete("/api/documents")
+def clear_all_documents():
+    docs = store.list_documents()
+    for doc in docs:
+        try:
+            sp = Path(doc["stored_path"])
+            if FILES_DIR.resolve() in sp.resolve().parents:
+                sp.unlink(missing_ok=True)
+        except OSError:
+            pass
+    store.clear_all_documents()
+    return {"ok": True}
+
+
+
 @app.post("/api/documents/{doc_id}/reindex")
 def reindex(doc_id: int):
     if not store.get_document(doc_id):
@@ -267,13 +292,20 @@ def test_chat():
 
 @app.get("/api/test/embeddings")
 def test_embeddings():
-    ecfg = load_config()["embeddings"]
+    cfg = load_config()
+    ecfg = dict(cfg.get("embeddings", {}))
+    if ecfg.get("provider") != "local" and cfg.get("chat", {}).get("provider") == "gemini":
+        ecfg["provider"] = "gemini"
+        if not ecfg.get("api_key"):
+            ecfg["api_key"] = cfg.get("chat", {}).get("api_key", "")
+
     try:
         from .embeddings import embed_texts
         emb = embed_texts(["connection test"], ecfg)
         return {"ok": True, "dim": len(emb[0])}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
 
 
 class ModelsProbeBody(BaseModel):
@@ -292,9 +324,12 @@ def models_probe(body: ModelsProbeBody):
 def models(which: str = "chat"):
     cfg = load_config()[which if which in ("chat", "embeddings") else "chat"]
     try:
+        if cfg.get("provider") == "gemini":
+            return test_connection(cfg)
         return {"ok": True, "models": list_models(cfg.get("base_url", ""), cfg.get("api_key", ""))}
     except Exception as e:
         return {"ok": False, "error": str(e), "models": []}
+
 
 
 @app.post("/api/update-deps")

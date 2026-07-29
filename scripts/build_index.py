@@ -108,40 +108,44 @@ def discover_embedding_model(api_key):
         return None
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
-        req = urllib.request.Request(url)
+        req = urllib.request.Request(url, headers={"x-goog-api-key": api_key})
         with urllib.request.urlopen(req) as resp:
             data = json.loads(resp.read().decode('utf-8'))
             models = data.get("models", [])
             for m in models:
                 m_name = m.get("name", "")
                 methods = m.get("supportedGenerationMethods", [])
-                if "embedContent" in methods:
+                if "embedContent" in methods and "embedding-001" not in m_name:
                     clean_name = m_name.replace("models/", "")
                     print(f"Discovered working embedding model for your key: {clean_name}")
                     return clean_name
     except Exception as e:
         print(f"Could not query models list: {e}")
-        
-    return "text-embedding-004"
+
+    return "gemini-embedding-2"
 
 def fetch_gemini_embedding(text, api_key, model_name):
     if not api_key or not model_name:
         return []
-        
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:embedContent?key={api_key}"
+    if "embedding-001" in model_name:
+        model_name = "gemini-embedding-2"
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:embedContent"
     payload = {
+        "model": f"models/{model_name}",
         "content": {
-            "parts": [{"text": text[:2000]}]
+            "parts": [{"text": text[:8000]}]
         }
     }
     data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "x-goog-api-key": api_key})
     try:
         with urllib.request.urlopen(req) as resp:
             res_json = json.loads(resp.read().decode('utf-8'))
             return res_json.get("embedding", {}).get("values", [])
     except Exception as e:
         return []
+
 
 def build_knowledge_base():
     codes_dir = Path("codes")
@@ -166,54 +170,76 @@ def build_knowledge_base():
     all_chunks = []
     embedding_failed_count = 0
     
+    local_embedder = None
+    try:
+        from fastembed import TextEmbedding
+        print("Using free local FastEmbed engine (BAAI/bge-small-en-v1.5) for GitHub indexing...")
+        local_embedder = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+    except Exception as e:
+        print(f"FastEmbed local engine not initialized: {e}")
+
     for file_path in all_files:
         filename = file_path.name
         ext = file_path.suffix.lower()
         print(f"Processing: {filename}...")
-        
+
         if ext == ".pdf":
             pages = extract_pdf_pages(file_path)
         elif ext == ".docx":
             pages = extract_docx_pages(file_path)
         else:
             pages = extract_text_pages(file_path)
-            
+
         doc_chunks = chunk_text(pages, filename)
-        
+
         documents_meta.append({
             "filename": filename,
             "page_count": len(pages),
             "chunk_count": len(doc_chunks)
         })
-        
+
         for c in doc_chunks:
-            if api_key and working_embed_model:
-                vec = fetch_gemini_embedding(c["text"], api_key, working_embed_model)
-                if vec:
-                    c["embedding"] = vec
-                else:
-                    embedding_failed_count += 1
-                    if embedding_failed_count > 3:
-                        # Disable embedding attempts for remaining chunks to finish build super fast
-                        working_embed_model = None
-                        print("Embedding calls failing on key. Disabling embedding for remaining chunks (falling back to BM25).")
             all_chunks.append(c)
-            
+
+    if local_embedder and all_chunks:
+        print(f"Computing free local CPU embeddings for {len(all_chunks)} chunk(s)...")
+        try:
+            chunk_texts = [c["text"] for c in all_chunks]
+            embs = list(local_embedder.embed(chunk_texts))
+            for idx, vec in enumerate(embs):
+                all_chunks[idx]["embedding"] = vec.tolist()
+            print("Successfully embedded all document chunks using free local FastEmbed!")
+        except Exception as e:
+            print(f"Local embedding computation failed: {e}")
+
+    if all_chunks and not all_chunks[0].get("embedding") and api_key and working_embed_model:
+        print("Falling back to Gemini API for building vector embeddings...")
+        for c in all_chunks:
+            vec = fetch_gemini_embedding(c["text"], api_key, working_embed_model)
+            if vec:
+                c["embedding"] = vec
+            else:
+                embedding_failed_count += 1
+                if embedding_failed_count > 3:
+                    working_embed_model = None
+                    print("Embedding calls failing on key. Falling back to BM25 for remaining chunks.")
+
     kb_data = {
         "documents": documents_meta,
         "chunks": all_chunks,
         "generated_at": str(Path("codes").stat().st_mtime) if codes_dir.exists() else ""
     }
-    
+
     out_file = out_dir / "knowledge_base.json"
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump(kb_data, f, indent=2)
-        
+
     root_out_file = Path("knowledge_base.json")
     with open(root_out_file, "w", encoding="utf-8") as f:
         json.dump(kb_data, f, indent=2)
-        
+
     print(f"Successfully generated knowledge_base.json with {len(all_chunks)} chunks from {len(documents_meta)} files.")
+
 
 if __name__ == "__main__":
     build_knowledge_base()

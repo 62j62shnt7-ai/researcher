@@ -149,7 +149,8 @@ a.cite:hover{text-decoration:underline}
   <div class="secHead">Chat history</div>
   <div id="chatList"></div>
   <div class="secHead">Documents</div>
-  <div id="selBar"><span id="selInfo"></span><a onclick="selectAll(true)">all</a><a onclick="selectAll(false)">none</a><select id="collectionFilter" onchange="collectionChanged()" title="Filter by collection"><option value="">all collections</option></select></div>
+  <div id="selBar"><span id="selInfo"></span><a onclick="selectAll(true)">all</a><a onclick="selectAll(false)">none</a><a onclick="clearAllDocs()" style="color:var(--bad);margin-left:auto;cursor:pointer" title="Delete all documents from library">clear all</a><select id="collectionFilter" onchange="collectionChanged()" title="Filter by collection"><option value="">all collections</option></select></div>
+
   <div id="docList"></div>
   <div id="stats"></div>
 </div>
@@ -200,9 +201,11 @@ a.cite:hover{text-decoration:underline}
     <div class="field"><label>Provider</label>
       <select id="s_provider">
         <option value="openai-compatible">OpenAI-compatible (LM Studio, Ollama, OpenAI, Groq…)</option>
+        <option value="gemini">Google Gemini</option>
         <option value="anthropic">Anthropic (Claude)</option>
       </select>
     </div>
+
     <div class="field"><label>Base URL</label><input id="s_base" placeholder="http://localhost:1234/v1"></div>
     <div class="row">
       <div class="field"><label>API key (blank for local)</label><input id="s_key" type="password"></div>
@@ -222,14 +225,22 @@ a.cite:hover{text-decoration:underline}
     <div class="testline" id="chatTest"></div>
 
     <h3>Embeddings (for semantic search)</h3>
-    <div class="field"><label><input type="checkbox" id="s_embEnabled" style="width:auto"> Enable vector search (recommended — load an embedding model like nomic-embed-text in LM Studio)</label></div>
-    <div class="field"><label>Embeddings base URL</label><input id="s_embBase" placeholder="http://localhost:1234/v1"></div>
+    <div class="field"><label><input type="checkbox" id="s_embEnabled" style="width:auto"> Enable vector search</label></div>
+    <div class="field"><label>Embeddings Provider / Engine</label>
+      <select id="s_embProvider">
+        <option value="local">Local In-App CPU (FastEmbed BGE-small — Zero API Keys, 100% Free & Unlimited)</option>
+        <option value="gemini">Google Gemini (gemini-embedding-2)</option>
+        <option value="openai-compatible">OpenAI-compatible / LM Studio / Ollama</option>
+      </select>
+    </div>
+    <div class="field"><label>Embeddings base URL (for OpenAI-compatible)</label><input id="s_embBase" placeholder="http://localhost:1234/v1"></div>
     <div class="row">
       <div class="field"><label>API key</label><input id="s_embKey" type="password"></div>
-      <div class="field"><label>Embedding model</label><input id="s_embModel" placeholder="e.g. text-embedding-nomic-embed-text-v1.5"></div>
+      <div class="field"><label>Embedding model</label><input id="s_embModel" placeholder="e.g. BAAI/bge-small-en-v1.5 or gemini-embedding-2"></div>
     </div>
     <button class="smallbtn" id="testEmbBtn">Test embeddings</button>
     <div class="testline" id="embTest"></div>
+
 
     <h3>Retrieval</h3>
     <div class="row">
@@ -318,15 +329,17 @@ async function refreshDocs(){
     else {badge=d.status+'…';cls='b-busy';processing=true;}
     const meta = (d.chunk_count ? `${d.chunk_count} chunks${d.pages?` · ${d.pages} pp`:''}` : (d.format||''))
                + (d.collection ? ` · 🏷 ${esc(d.collection)}` : '');
+    const errHtml = d.error ? `<div style="font-size:11px;color:${d.status==='error'?'var(--bad)':'var(--warn)'};margin-top:3px;cursor:pointer" onclick="alert('Document details:\\n\\n' + ${JSON.stringify(d.error)})" title="Click to view full error message">⚠️ ${esc(d.error)}</div>` : '';
     div.innerHTML = `<input type="checkbox" title="Include in chat" ${docSel[d.id]?'checked':''} onchange="toggleSel(${d.id}, this.checked)">
       <div style="flex:1;min-width:0">
-        <div class="name" title="${esc(d.filename)}${d.error?' — '+esc(d.error):''}">${esc(d.filename)}</div>
-        <div class="meta">${meta}</div></div>
-      <span class="badge ${cls}" ${d.error?`title="${esc(d.error)}"`:''}>${badge}</span>
+        <div class="name" title="${esc(d.filename)}">${esc(d.filename)}</div>
+        <div class="meta">${meta}${errHtml}</div></div>
+      <span class="badge ${cls}" style="cursor:${d.error?'pointer':'default'}" onclick="if(${JSON.stringify(d.error||'')}) alert('Document details:\\n\\n' + ${JSON.stringify(d.error)})" title="${d.error?'Click for details':badge}">${badge}</span>
       <button title="Set collection/project" onclick="setDocCollection(${d.id})">🏷</button>
       <button title="Re-index" onclick="reindexDoc(${d.id})">↻</button>
       <button title="Delete" onclick="deleteDoc(${d.id})">✕</button>`;
     list.appendChild(div);
+
   }
   for(const id in docSel) if(!seen.has(id)) delete docSel[id];   // drop deleted docs
   updateSelInfo();
@@ -349,7 +362,14 @@ function collectionChanged(){
 }
 async function deleteDoc(id){ if(!confirm('Remove this document from the library?'))return;
   await fetch('/api/documents/'+id,{method:'DELETE'}); refreshDocs(); }
+async function clearAllDocs(){
+  if(!confirm('Are you sure you want to delete ALL documents from your library?')) return;
+  await fetch('/api/documents', {method:'DELETE'});
+  docSel = {};
+  refreshDocs();
+}
 async function reindexDoc(id){ await fetch(`/api/documents/${id}/reindex`,{method:'POST'}); refreshDocs(); }
+
 
 // upload
 const zone = $('uploadZone'), fi = $('fileInput');
@@ -643,6 +663,7 @@ async function openSettings(){
   $('s_ctx').value = cfg.chat.context_tokens || 8192;
   $('s_maxtok').value = cfg.chat.max_tokens || 3000;
   $('s_embEnabled').checked = cfg.embeddings.enabled;
+  $('s_embProvider').value = cfg.embeddings.provider || (cfg.chat.provider === 'gemini' ? 'gemini' : 'local');
   $('s_embBase').value = cfg.embeddings.base_url;
   $('s_embKey').value = cfg.embeddings.api_key;
   $('s_embModel').value = cfg.embeddings.model;
@@ -659,20 +680,42 @@ $('gearBtn').onclick = openSettings;
 $('cancelBtn').onclick = ()=> $('modalBg').classList.remove('open');
 $('modalBg').onclick = e=>{ if(e.target===$('modalBg')) $('modalBg').classList.remove('open'); };
 $('s_provider').onchange = ()=>{
-  if($('s_provider').value==='anthropic'){ $('s_base').value='https://api.anthropic.com'; $('s_model').value='claude-sonnet-4-6'; }
-  else { $('s_base').value='http://localhost:1234/v1'; $('s_model').value=''; }
+  if($('s_provider').value==='anthropic'){
+    $('s_base').value='https://api.anthropic.com';
+    $('s_model').value='claude-sonnet-4-6';
+  } else if($('s_provider').value==='gemini'){
+    $('s_base').value='https://generativelanguage.googleapis.com';
+    $('s_model').value='gemini-1.5-flash';
+    $('s_embProvider').value='gemini';
+    $('s_embBase').value='https://generativelanguage.googleapis.com';
+    $('s_embModel').value='gemini-embedding-2';
+  } else {
+    $('s_base').value='http://localhost:1234/v1';
+    $('s_model').value='';
+  }
   setModelOptions([]);
 };
+
 $('s_modelSelect').onchange = ()=>{ if($('s_modelSelect').value) $('s_model').value = $('s_modelSelect').value; };
 $('s_base').addEventListener('input', ()=> setModelOptions([]));
 $('s_key').addEventListener('input', ()=> setModelOptions([]));
 $('saveBtn').onclick = async ()=>{
+  let embBase = $('s_embBase').value.trim();
+  let embKey = $('s_embKey').value.trim();
+  let embModel = $('s_embModel').value.trim();
+  let embProvider = $('s_embProvider').value;
+  let chatProvider = $('s_provider').value;
+  if(embProvider === 'gemini'){
+    if(!embKey) embKey = $('s_key').value.trim();
+    if(!embBase || embBase.includes('localhost') || embBase.includes('127.0.0.1')) embBase = 'https://generativelanguage.googleapis.com';
+    if(!embModel || embModel.includes('embedding-001')) embModel = 'gemini-embedding-2';
+  }
   const body = {
-    chat:{ provider:$('s_provider').value, base_url:$('s_base').value.trim(), api_key:$('s_key').value.trim(),
+    chat:{ provider:chatProvider, base_url:$('s_base').value.trim(), api_key:$('s_key').value.trim(),
            model:$('s_model').value.trim(), temperature:cfg.chat.temperature,
            max_tokens:+$('s_maxtok').value||3000, context_tokens:+$('s_ctx').value||8192 },
-    embeddings:{ enabled:$('s_embEnabled').checked, base_url:$('s_embBase').value.trim(),
-                 api_key:$('s_embKey').value.trim(), model:$('s_embModel').value.trim(), batch_size:cfg.embeddings.batch_size },
+    embeddings:{ enabled:$('s_embEnabled').checked, provider: embProvider,
+                 base_url:embBase, api_key:embKey, model:embModel, batch_size:cfg.embeddings.batch_size },
     retrieval:{ top_k:+$('s_topk').value||8, vector_weight:Math.max(0,Math.min(1,+$('s_vw').value||0.6)),
                 chunk_size:cfg.retrieval.chunk_size, chunk_overlap:cfg.retrieval.chunk_overlap },
     watch:{ folders:watchFolders.slice(), auto:$('s_watchAuto').checked,
@@ -687,11 +730,21 @@ $('testChatBtn').onclick = async ()=>{
 };
 $('testEmbBtn').onclick = async ()=>{
   $('embTest').textContent = 'Testing…'; $('embTest').className='testline';
-  const tmp = { embeddings:{ enabled:true, base_url:$('s_embBase').value.trim(), api_key:$('s_embKey').value.trim(), model:$('s_embModel').value.trim() } };
+  let embBase = $('s_embBase').value.trim();
+  let embKey = $('s_embKey').value.trim();
+  let embModel = $('s_embModel').value.trim();
+  let embProvider = $('s_embProvider').value;
+  if(embProvider === 'gemini'){
+    if(!embKey) embKey = $('s_key').value.trim();
+    if(!embBase || embBase.includes('localhost') || embBase.includes('127.0.0.1')) embBase = 'https://generativelanguage.googleapis.com';
+    if(!embModel || embModel.includes('embedding-001')) embModel = 'gemini-embedding-2';
+  }
+  const tmp = { embeddings:{ enabled:true, provider: embProvider, base_url:embBase, api_key:embKey, model:embModel } };
+
   await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(tmp)});
   const d = await (await fetch('/api/test/embeddings')).json().catch(()=>null);
-  if(d && d.ok){ $('embTest').textContent = `✓ Working (dimension ${d.dim})`; $('embTest').className='testline ok'; }
-  else{ $('embTest').textContent = '✗ '+((d&&(d.error||d.detail))||'Connection failed — is an embedding model loaded?'); $('embTest').className='testline bad'; }
+  if(d && d.ok){ $('embTest').textContent = `✓ Working (${embProvider==='local'?'Local In-App CPU':embProvider} — dimension ${d.dim})`; $('embTest').className='testline ok'; }
+  else{ $('embTest').textContent = '✗ '+((d&&(d.error||d.detail))||'Connection failed — check provider & settings'); $('embTest').className='testline bad'; }
 };
 
 // ---------- watch folders UI ----------

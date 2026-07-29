@@ -184,6 +184,19 @@
     });
   }
 
+  function clearAllLocalDocuments() {
+    return new Promise((resolve) => {
+      if (!state.db) return resolve();
+      const tx = state.db.transaction(['documents', 'chunks'], 'readwrite');
+      tx.objectStore('documents').clear();
+      tx.objectStore('chunks').clear();
+      tx.oncomplete = () => {
+        loadLocalData().then(resolve);
+      };
+    });
+  }
+
+
   // --- Fetch Pre-indexed Knowledge Base (Cloud or Repo) ---
   async function fetchRepoKB() {
     const targetUrl = state.cloudUrl || 'knowledge_base.json';
@@ -452,34 +465,65 @@
     return dot / (Math.sqrt(normA) * Math.sqrt(normB) + 1e-9);
   }
 
-  // --- Gemini API Embeddings & Chat ---
-  async function fetchQueryEmbedding(query) {
-    if (!state.apiKey) return null;
-    const models = ['text-embedding-004', 'embedding-001'];
-
-    for (const model of models) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${state.apiKey}`;
+  let localBrowserEmbedder = null;
+  async function getLocalBrowserEmbedder() {
+    if (localBrowserEmbedder) return localBrowserEmbedder;
+    if (window.transformers && window.transformers.pipeline) {
       try {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            content: { parts: [{ text: query.substring(0, 2000) }] }
-          })
-        });
-        if (res.ok) {
-          const data = await res.json();
-          const vals = data.embedding?.values;
-          if (vals && vals.length > 0) {
-            return vals;
-          }
-        }
+        console.log('Loading free client-side browser embedding model (Xenova/bge-small-en-v1.5)...');
+        localBrowserEmbedder = await window.transformers.pipeline('feature-extraction', 'Xenova/bge-small-en-v1.5');
+        return localBrowserEmbedder;
       } catch (e) {
-        console.warn(`Embedding failed for ${model}:`, e);
+        console.warn('Transformers.js client pipeline error:', e);
       }
     }
     return null;
   }
+
+  // --- Embeddings & Chat ---
+  async function fetchQueryEmbedding(query) {
+    // 1. Try free Transformers.js browser embedding
+    const localEmbedder = await getLocalBrowserEmbedder();
+    if (localEmbedder) {
+      try {
+        const out = await localEmbedder(query, { pooling: 'mean', normalize: true });
+        return Array.from(out.data);
+      } catch (e) {
+        console.warn('Client browser embedding computation failed:', e);
+      }
+    }
+
+    // 2. Fallback to Gemini API if key is present
+    if (state.apiKey) {
+      const models = ['gemini-embedding-2', 'text-embedding-004'];
+
+      for (const model of models) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent`;
+        try {
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
+            body: JSON.stringify({
+              model: `models/${model}`,
+              content: { parts: [{ text: query.substring(0, 8000) }] }
+            })
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const vals = data.embedding?.values;
+            if (vals && vals.length > 0) {
+              return vals;
+            }
+          }
+        } catch (e) {
+          console.warn(`Embedding failed for ${model}:`, e);
+        }
+      }
+    }
+
+    return null;
+  }
+
 
   async function callGeminiChat(userPrompt, retrievedChunks, docScope = 'all') {
     if (!state.apiKey) {
@@ -736,7 +780,12 @@ If the context does not contain enough information, state what is known and clar
       if (state.localDocs.length === 0) {
         elements.localDocsList.innerHTML = '<p class="doc-meta">No local documents uploaded yet.</p>';
       } else {
-        elements.localDocsList.innerHTML = state.localDocs.map(d => `
+        elements.localDocsList.innerHTML = `
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+            <span class="doc-meta" style="font-weight:600;">${state.localDocs.length} local document(s)</span>
+            <button id="btn-clear-all-local" class="btn-text-only" style="color:var(--bad, #e0635c); font-size:0.8rem; cursor:pointer;" type="button">🗑️ Clear All</button>
+          </div>
+        ` + state.localDocs.map(d => `
           <div class="doc-item">
             <div>
               <div class="doc-name">📱 ${d.filename}</div>
@@ -746,6 +795,15 @@ If the context does not contain enough information, state what is known and clar
           </div>
         `).join('');
 
+        const clearBtn = document.getElementById('btn-clear-all-local');
+        if (clearBtn) {
+          clearBtn.addEventListener('click', async () => {
+            if (confirm('Are you sure you want to clear all uploaded local documents?')) {
+              await clearAllLocalDocuments();
+            }
+          });
+        }
+
         document.querySelectorAll('.btn-del-doc').forEach(btn => {
           btn.addEventListener('click', (e) => {
             const docId = e.currentTarget.getAttribute('data-id');
@@ -754,6 +812,7 @@ If the context does not contain enough information, state what is known and clar
         });
       }
     }
+
   }
 
   function renderMessage(role, text, citations = []) {
@@ -909,16 +968,16 @@ If the context does not contain enough information, state what is known and clar
           } catch (e) {}
         }
 
-        const embedModels = ['text-embedding-004', 'embedding-001'];
+        const embedModels = ['gemini-embedding-2', 'text-embedding-004'];
         let workingEmbedModel = '';
 
         for (const em of embedModels) {
           try {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${em}:embedContent?key=${testKey}`;
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${em}:embedContent`;
             const res = await fetch(url, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ content: { parts: [{ text: 'Ping' }] } })
+              headers: { 'Content-Type': 'application/json', 'x-goog-api-key': testKey },
+              body: JSON.stringify({ model: `models/${em}`, content: { parts: [{ text: 'Ping' }] } })
             });
             if (res.ok) {
               embedStatus = true;
@@ -927,6 +986,7 @@ If the context does not contain enough information, state what is known and clar
             }
           } catch (e) {}
         }
+
 
         if (chatStatus) {
           elements.settingsStatus.className = 'status-msg success';
