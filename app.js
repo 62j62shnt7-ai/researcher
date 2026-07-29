@@ -960,8 +960,45 @@ If the context does not contain enough information, state what is known and clar
     }
   }
 
+  function showThinkingIndicator(initialStatus = 'Searching engineering library...') {
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'message system-message thinking-message';
+    msgDiv.id = 'active-thinking-message';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'message-avatar';
+    avatar.textContent = '⚡';
+
+    const body = document.createElement('div');
+    body.className = 'message-body';
+    body.style.cssText = 'display:flex; align-items:center; gap:8px; color:var(--text-muted, #94a3b8); font-style:italic; font-size:14px;';
+    body.innerHTML = `
+      <span class="spinner" style="display:inline-block; width:14px; height:14px; border:2px solid #3b82f6; border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite;"></span>
+      <span id="thinking-status-text">${initialStatus}</span>
+    `;
+
+    msgDiv.appendChild(avatar);
+    msgDiv.appendChild(body);
+    if (elements.chatMessages) {
+      elements.chatMessages.appendChild(msgDiv);
+      elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+    }
+
+    return {
+      update: (text) => {
+        const el = document.getElementById('thinking-status-text');
+        if (el) el.textContent = text;
+        if (elements.chatMessages) elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+      },
+      remove: () => {
+        msgDiv.remove();
+      }
+    };
+  }
+
 
   // --- Event Listeners ---
+
   function setupEventListeners() {
     if (elements.btnSettings) {
       elements.btnSettings.addEventListener('click', () => {
@@ -1290,21 +1327,29 @@ If the context does not contain enough information, state what is known and clar
         const docScope = elements.docScopeSelect ? elements.docScopeSelect.value : 'all';
         let retrieved = [];
 
-        if (useRag) {
-          retrieved = await performHybridSearch(prompt, 5, docScope);
-        }
+        const thinking = showThinkingIndicator(useRag ? '🔍 Searching engineering library & matching clauses...' : '⚡ Connecting to Gemini AI...');
 
         try {
+          if (useRag) {
+            retrieved = await performHybridSearch(prompt, 5, docScope);
+            thinking.update(`🧠 Reasoning with ${state.model || 'Gemini'}... (${retrieved.length} source clauses retrieved)`);
+          } else {
+            thinking.update(`🧠 Reasoning with ${state.model || 'Gemini'}...`);
+          }
+
           const res = await callGeminiChat(prompt, retrieved, docScope);
+          thinking.remove();
+
           const text = typeof res === 'object' ? res.answer : res;
           const modelBadge = typeof res === 'object' ? res.modelUsed : '';
           renderMessage('assistant', text, retrieved, modelBadge);
         } catch (err) {
+          thinking.remove();
           renderMessage('assistant', `⚠️ **Error**: ${err.message}`);
         }
-
       });
     }
+
 
     if (elements.btnExportDb) {
       elements.btnExportDb.addEventListener('click', () => {
