@@ -176,10 +176,18 @@
     });
   }
 
-  // --- Fetch Pre-indexed Knowledge Base (Cloud or Repo) ---
+  // --- Fetch Pre-indexed Knowledge Base (Cloud, Google Drive, or Repo) ---
   async function fetchRepoKB() {
     const targetUrl = state.cloudUrl || 'knowledge_base.json';
     try {
+      // Check if targetUrl is a Google Drive folder link
+      const driveMatch = targetUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+      if (driveMatch) {
+        const folderId = driveMatch[1];
+        await loadGoogleDriveFolder(folderId);
+        return;
+      }
+
       const res = await fetch(targetUrl);
       if (res.ok) {
         state.repoKB = await res.json();
@@ -189,6 +197,45 @@
       }
     } catch (e) {
       console.warn('Could not load knowledge base from:', targetUrl, e);
+    }
+  }
+
+  async function loadGoogleDriveFolder(folderId) {
+    if (!folderId) return;
+    try {
+      let files = [];
+      if (state.apiKey) {
+        const apiUrl = `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+trashed%3Dfalse&fields=files(id%2Cname%2CmimeType)&key=${state.apiKey}`;
+        const res = await fetch(apiUrl);
+        if (res.ok) {
+          const data = await res.json();
+          files = data.files || [];
+        }
+      }
+
+      if (files.length === 0) {
+        console.warn('Google Drive folder query returned no files or API Key needed.');
+        return;
+      }
+
+      for (const file of files) {
+        const downloadUrl = `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&key=${state.apiKey}`;
+        try {
+          const fileRes = await fetch(downloadUrl);
+          if (fileRes.ok) {
+            const blob = await fileRes.blob();
+            const fileObj = new File([blob], file.name, { type: file.mimeType });
+            await processUploadedFile(fileObj);
+          }
+        } catch (err) {
+          console.warn(`Could not download drive file ${file.name}:`, err);
+        }
+      }
+
+      updateLibraryUI();
+      populateDocScopeSelect();
+    } catch (e) {
+      console.warn('Error loading Google Drive folder:', e);
     }
   }
 
