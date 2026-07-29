@@ -24,7 +24,9 @@
 
   function initElements() {
     elements.apiKeyInput = document.getElementById('api-key-input');
+    elements.chatModelSelect = document.getElementById('chat-model-select');
     elements.embeddingEngineSelect = document.getElementById('embedding-engine-select');
+
     elements.cloudUrlInput = document.getElementById('cloud-url-input');
 
     elements.btnFetchCloud = document.getElementById('btn-fetch-cloud');
@@ -532,8 +534,8 @@
       throw new Error('Please set your Gemini API key in Settings first.');
     }
 
-    const selected = elements.modelSelect ? elements.modelSelect.value : state.model;
-    const modelsToTry = [selected, 'gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-pro'].filter(Boolean);
+    const selectedModel = (elements.chatModelSelect && elements.chatModelSelect.value) || state.model || 'gemini-2.0-flash';
+    const modelsToTry = [selectedModel, 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'].filter((m, i, arr) => m && arr.indexOf(m) === i);
     let lastError = null;
 
     let contextText = '';
@@ -578,8 +580,8 @@ If the context does not contain enough information, state what is known and clar
         if (res.ok) {
           const data = await res.json();
           const candidate = data.candidates?.[0];
-          const answer = candidate?.content?.parts?.map(p => p.text).join('') || 'No response generated.';
-          return answer;
+          const answerText = candidate?.content?.parts?.map(p => p.text).join('') || 'No response generated.';
+          return { answer: answerText, modelUsed: modelName };
         } else {
           const errJson = await res.json().catch(() => ({}));
           lastError = new Error(errJson.error?.message || `HTTP ${res.status}`);
@@ -590,6 +592,7 @@ If the context does not contain enough information, state what is known and clar
     }
 
     throw lastError || new Error('Failed to communicate with Gemini API.');
+
   }
 
   // --- Hybrid Retriever (Filtered by Document Scope) ---
@@ -858,7 +861,7 @@ If the context does not contain enough information, state what is known and clar
 
   }
 
-  function renderMessage(role, text, citations = []) {
+  function renderMessage(role, text, citations = [], modelBadge = '') {
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${role === 'user' ? 'user-message' : 'system-message'}`;
 
@@ -892,6 +895,13 @@ If the context does not contain enough information, state what is known and clar
       body.appendChild(citationsWrapper);
     }
 
+    if (modelBadge && role === 'assistant') {
+      const badgeDiv = document.createElement('div');
+      badgeDiv.style.cssText = 'font-size: 11px; color: #64748b; margin-top: 6px; font-family: monospace; display: flex; align-items: center; gap: 4px; border-top: 1px solid #334155; padding-top: 4px;';
+      badgeDiv.innerHTML = `⚡ Engine Model: <strong style="color:#3b82f6;">${modelBadge}</strong>`;
+      body.appendChild(badgeDiv);
+    }
+
     msgDiv.appendChild(avatar);
     msgDiv.appendChild(body);
     if (elements.chatMessages) {
@@ -900,15 +910,18 @@ If the context does not contain enough information, state what is known and clar
     }
   }
 
+
   // --- Event Listeners ---
   function setupEventListeners() {
     if (elements.btnSettings) {
       elements.btnSettings.addEventListener('click', () => {
         elements.apiKeyInput.value = state.apiKey;
+        if (elements.chatModelSelect) elements.chatModelSelect.value = state.model || 'gemini-2.0-flash';
         if (elements.cloudUrlInput) elements.cloudUrlInput.value = state.cloudUrl;
         elements.settingsModal.classList.remove('hidden');
       });
     }
+
 
     if (elements.settingsModal) {
       const closeBtn = elements.settingsModal.querySelector('.modal-close');
@@ -959,8 +972,10 @@ If the context does not contain enough information, state what is known and clar
     if (elements.btnSaveKey) {
       elements.btnSaveKey.addEventListener('click', async () => {
         state.apiKey = elements.apiKeyInput.value.trim();
+        if (elements.chatModelSelect) state.model = elements.chatModelSelect.value;
         state.cloudUrl = elements.cloudUrlInput ? elements.cloudUrlInput.value.trim() : '';
         localStorage.setItem('gemini_api_key', state.apiKey);
+        localStorage.setItem('gemini_model', state.model);
         localStorage.setItem('cloud_storage_url', state.cloudUrl);
         await fetchRepoKB();
         await discoverUserModels(state.apiKey);
@@ -973,6 +988,7 @@ If the context does not contain enough information, state what is known and clar
         }, 1200);
       });
     }
+
 
     if (elements.btnTestKey) {
       elements.btnTestKey.addEventListener('click', async () => {
@@ -1175,11 +1191,14 @@ If the context does not contain enough information, state what is known and clar
         }
 
         try {
-          const answer = await callGeminiChat(prompt, retrieved, docScope);
-          renderMessage('assistant', answer, retrieved);
+          const res = await callGeminiChat(prompt, retrieved, docScope);
+          const text = typeof res === 'object' ? res.answer : res;
+          const modelBadge = typeof res === 'object' ? res.modelUsed : '';
+          renderMessage('assistant', text, retrieved, modelBadge);
         } catch (err) {
           renderMessage('assistant', `⚠️ **Error**: ${err.message}`);
         }
+
       });
     }
 
