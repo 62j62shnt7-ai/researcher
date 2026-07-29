@@ -135,12 +135,12 @@
             <small>Stored locally in your browser. Get free key at aistudio.google.com.</small>
           </div>
           <div class="form-group" style="margin-top: 1rem;">
-            <label for="cloud-url-input">Google Drive PDF Link or Cloud URL</label>
+            <label for="cloud-url-input">Cloud Link (Dropbox, Drive, or Direct PDF URL)</label>
             <div style="display: flex; gap: 0.5rem;">
-              <input type="url" id="cloud-url-input" placeholder="https://drive.google.com/file/d/... or folder link" autocomplete="off" style="flex: 1;">
+              <input type="url" id="cloud-url-input" placeholder="Dropbox link, Drive link, or direct PDF URL..." autocomplete="off" style="flex: 1;">
               <button id="btn-fetch-cloud" class="btn btn-secondary" type="button">🔄 Fetch Link</button>
             </div>
-            <small>Paste any Google Drive share link, folder link, or direct PDF URL.</small>
+            <small>Paste Dropbox folder/file links, Google Drive share links, or direct PDF URLs.</small>
 
             <div id="drive-files-container" class="drive-files-container hidden" style="margin-top: 0.75rem; background-color: var(--bg-dark); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 0.75rem;">
               <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
@@ -193,6 +193,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=1.1.4"></script>
+  <script src="app.js?v=1.1.5"></script>
 </body>
 </html>

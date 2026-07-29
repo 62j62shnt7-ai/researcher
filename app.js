@@ -221,9 +221,21 @@
 
     let downloadUrl = urlInput.trim();
     let filename = 'Cloud_Document.pdf';
-
     const driveMatch = urlInput.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || urlInput.match(/id=([a-zA-Z0-9_-]+)/);
-    if (driveMatch) {
+
+    if (urlInput.toLowerCase().includes('dropbox.com')) {
+      downloadUrl = urlInput.replace('www.dropbox.com', 'dl.dropboxusercontent.com').replace('?dl=0', '?raw=1');
+      if (!downloadUrl.includes('raw=1') && !downloadUrl.includes('dl=1')) {
+        downloadUrl += (downloadUrl.includes('?') ? '&raw=1' : '?raw=1');
+      }
+      const urlParts = urlInput.split('/');
+      const lastPart = urlParts[urlParts.length - 1].split('?')[0];
+      if (lastPart && lastPart.toLowerCase().endsWith('.pdf')) {
+        filename = decodeURIComponent(lastPart);
+      } else {
+        filename = 'Dropbox_Code.pdf';
+      }
+    } else if (driveMatch) {
       const fileId = driveMatch[1];
       downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
       filename = `Google_Drive_Code_${fileId.substring(0, 6)}.pdf`;
