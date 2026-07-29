@@ -1,6 +1,6 @@
 /**
  * Researcher AI - Client App Engine
- * Hybrid RAG (BM25 + Gemini Embeddings) & Client-side PDF/DOCX Parser
+ * Hybrid RAG (BM25 + Gemini Embeddings) with Cloud Storage & Document Selector
  */
 
 (function () {
@@ -10,6 +10,7 @@
   const state = {
     apiKey: localStorage.getItem('gemini_api_key') || '',
     model: localStorage.getItem('gemini_model') || 'gemini-1.5-flash',
+    cloudUrl: localStorage.getItem('cloud_storage_url') || '',
     repoKB: { documents: [], chunks: [] },
     localDocs: [],
     localChunks: [],
@@ -22,6 +23,7 @@
 
   function initElements() {
     elements.apiKeyInput = document.getElementById('api-key-input');
+    elements.cloudUrlInput = document.getElementById('cloud-url-input');
     elements.btnSaveKey = document.getElementById('btn-save-key');
     elements.btnTestKey = document.getElementById('btn-test-key');
     elements.btnSettings = document.getElementById('btn-settings');
@@ -49,6 +51,7 @@
     elements.btnSend = document.getElementById('btn-send');
     elements.useRagToggle = document.getElementById('use-rag-toggle');
     elements.modelSelect = document.getElementById('model-select');
+    elements.docScopeSelect = document.getElementById('doc-scope-select');
     elements.filterPills = document.querySelectorAll('.pill');
   }
 
@@ -72,13 +75,14 @@
         const models = data.models || [];
         const generateModels = models.filter(m => m.supportedGenerationMethods?.includes('generateContent'));
         if (generateModels.length > 0 && elements.modelSelect) {
+          const currentVal = elements.modelSelect.value;
           elements.modelSelect.innerHTML = '';
           generateModels.forEach(m => {
             const modelId = m.name.replace('models/', '');
             const opt = document.createElement('option');
             opt.value = modelId;
             opt.textContent = `${m.displayName || modelId}`;
-            if (modelId === state.model || (modelId.includes('1.5-flash') && !elements.modelSelect.value)) {
+            if (modelId === currentVal || modelId === state.model || (modelId.includes('1.5-flash') && !elements.modelSelect.value)) {
               opt.selected = true;
             }
             elements.modelSelect.appendChild(opt);
@@ -125,6 +129,7 @@
         state.localDocs = docsReq.result || [];
         state.localChunks = chunksReq.result || [];
         updateLibraryUI();
+        populateDocScopeSelect();
         resolve();
       };
     });
@@ -171,18 +176,44 @@
     });
   }
 
-  // --- Fetch Pre-indexed Repo Knowledge Base ---
+  // --- Fetch Pre-indexed Knowledge Base (Cloud or Repo) ---
   async function fetchRepoKB() {
+    const targetUrl = state.cloudUrl || 'knowledge_base.json';
     try {
-      const res = await fetch('knowledge_base.json');
+      const res = await fetch(targetUrl);
       if (res.ok) {
         state.repoKB = await res.json();
-        console.log('Loaded repo knowledge base:', state.repoKB);
+        console.log('Loaded knowledge base from:', targetUrl, state.repoKB);
         updateLibraryUI();
+        populateDocScopeSelect();
       }
     } catch (e) {
-      console.warn('Could not load knowledge_base.json (it will be built by GitHub Actions)', e);
+      console.warn('Could not load knowledge base from:', targetUrl, e);
     }
+  }
+
+  // --- Populate Code Scope Selector Dropdown ---
+  function populateDocScopeSelect() {
+    if (!elements.docScopeSelect) return;
+    const currentScope = elements.docScopeSelect.value || 'all';
+    elements.docScopeSelect.innerHTML = '<option value="all">🌐 All Codes & Standards</option>';
+
+    const repoDocs = state.repoKB.documents || [];
+    repoDocs.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.filename;
+      opt.textContent = `📄 ${d.filename}`;
+      if (d.filename === currentScope) opt.selected = true;
+      elements.docScopeSelect.appendChild(opt);
+    });
+
+    state.localDocs.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d.filename;
+      opt.textContent = `📱 ${d.filename}`;
+      if (d.filename === currentScope) opt.selected = true;
+      elements.docScopeSelect.appendChild(opt);
+    });
   }
 
   // --- Tokenizer & BM25 Scoring ---
@@ -244,7 +275,7 @@
     return null;
   }
 
-  async function callGeminiChat(userPrompt, retrievedChunks) {
+  async function callGeminiChat(userPrompt, retrievedChunks, docScope = 'all') {
     if (!state.apiKey) {
       throw new Error('Please set your Gemini API key in Settings first.');
     }
@@ -261,8 +292,9 @@
         ).join('\n\n---\n\n');
     }
 
-    const systemInstruction = `You are Researcher AI, an expert engineering codes & standards assistant. 
-Your goal is to provide precise, technical, and accurate answers based on engineering codes, standards, and datasheets.
+    const scopeInstruction = docScope !== 'all' ? `You are specifically answering questions regarding the engineering code: "${docScope}". Focus strictly on this document.` : 'You are answering based on all available engineering codes & standards.';
+
+    const systemInstruction = `You are Researcher AI, an expert engineering codes & standards assistant. ${scopeInstruction}
 If context excerpts are provided above, use them strictly to answer the user's question. 
 Always cite exact files, clauses (e.g. Para 304.1.2), and page numbers in brackets like [Source 1] or [File, Page X].
 If the context does not contain enough information, state what is known and clarify any limits.`;
@@ -308,8 +340,8 @@ If the context does not contain enough information, state what is known and clar
     throw lastError || new Error('Failed to communicate with Gemini API.');
   }
 
-  // --- Hybrid Retriever ---
-  async function performHybridSearch(query, topK = 5) {
+  // --- Hybrid Retriever (Filtered by Document Scope) ---
+  async function performHybridSearch(query, topK = 5, docScope = 'all') {
     const qTokens = tokenize(query);
     const queryVec = await fetchQueryEmbedding(query);
 
@@ -319,6 +351,11 @@ If the context does not contain enough information, state what is known and clar
     }
     if (state.activeFilter === 'all' || state.activeFilter === 'local') {
       allChunks = allChunks.concat(state.localChunks || []);
+    }
+
+    // Filter chunks by selected document scope if not 'all'
+    if (docScope && docScope !== 'all') {
+      allChunks = allChunks.filter(c => c.file === docScope || c.docId === docScope);
     }
 
     const scored = allChunks.map((chunk) => {
@@ -453,7 +490,7 @@ If the context does not contain enough information, state what is known and clar
 
     if (elements.repoDocsList) {
       if (repoDocs.length === 0) {
-        elements.repoDocsList.innerHTML = '<p class="doc-meta">No pre-indexed standards in repo yet.</p>';
+        elements.repoDocsList.innerHTML = '<p class="doc-meta">No pre-indexed standards in repo or cloud yet.</p>';
       } else {
         elements.repoDocsList.innerHTML = repoDocs.map(d => `
           <div class="doc-item">
@@ -461,7 +498,7 @@ If the context does not contain enough information, state what is known and clar
               <div class="doc-name">📄 ${d.filename}</div>
               <div class="doc-meta">${d.chunk_count} chunks • ${d.page_count} pages</div>
             </div>
-            <span class="pill">GitHub</span>
+            <span class="pill">Cloud/Repo</span>
           </div>
         `).join('');
       }
@@ -538,6 +575,7 @@ If the context does not contain enough information, state what is known and clar
     if (elements.btnSettings) {
       elements.btnSettings.addEventListener('click', () => {
         elements.apiKeyInput.value = state.apiKey;
+        if (elements.cloudUrlInput) elements.cloudUrlInput.value = state.cloudUrl;
         elements.settingsModal.classList.remove('hidden');
       });
     }
@@ -554,10 +592,13 @@ If the context does not contain enough information, state what is known and clar
     if (elements.btnSaveKey) {
       elements.btnSaveKey.addEventListener('click', async () => {
         state.apiKey = elements.apiKeyInput.value.trim();
+        state.cloudUrl = elements.cloudUrlInput ? elements.cloudUrlInput.value.trim() : '';
         localStorage.setItem('gemini_api_key', state.apiKey);
+        localStorage.setItem('cloud_storage_url', state.cloudUrl);
+        await fetchRepoKB();
         await discoverUserModels(state.apiKey);
         elements.settingsStatus.className = 'status-msg success';
-        elements.settingsStatus.textContent = 'API Key saved! Discovered available models.';
+        elements.settingsStatus.textContent = 'Settings saved! Cloud database and models updated.';
         elements.settingsStatus.classList.remove('hidden');
         setTimeout(() => {
           elements.settingsModal.classList.add('hidden');
@@ -667,6 +708,7 @@ If the context does not contain enough information, state what is known and clar
           }
         }
         updateLibraryUI();
+        populateDocScopeSelect();
         elements.fileInput.value = '';
       });
     }
@@ -695,7 +737,8 @@ If the context does not contain enough information, state what is known and clar
 
         clearTimeout(searchTimeout);
         searchTimeout = setTimeout(async () => {
-          const results = await performHybridSearch(val, 6);
+          const docScope = elements.docScopeSelect ? elements.docScopeSelect.value : 'all';
+          const results = await performHybridSearch(val, 6, docScope);
           elements.resultsCount.textContent = results.length;
           if (results.length === 0) {
             elements.resultsList.innerHTML = '<p class="result-text">No matching code clauses found.</p>';
@@ -736,14 +779,15 @@ If the context does not contain enough information, state what is known and clar
         renderMessage('user', prompt);
 
         const useRag = elements.useRagToggle.checked;
+        const docScope = elements.docScopeSelect ? elements.docScopeSelect.value : 'all';
         let retrieved = [];
 
         if (useRag) {
-          retrieved = await performHybridSearch(prompt, 5);
+          retrieved = await performHybridSearch(prompt, 5, docScope);
         }
 
         try {
-          const answer = await callGeminiChat(prompt, retrieved);
+          const answer = await callGeminiChat(prompt, retrieved, docScope);
           renderMessage('assistant', answer, retrieved);
         } catch (err) {
           renderMessage('assistant', `⚠️ **Error**: ${err.message}`);
@@ -785,6 +829,7 @@ If the context does not contain enough information, state what is known and clar
             }
             alert('Backup restored successfully!');
             updateLibraryUI();
+            populateDocScopeSelect();
           }
         } catch (err) {
           alert('Invalid backup file: ' + err.message);
@@ -801,7 +846,7 @@ If the context does not contain enough information, state what is known and clar
       await discoverUserModels(state.apiKey);
     }
     setupEventListeners();
-    console.log('Researcher AI Web App initialized successfully.');
+    console.log('Researcher AI Web App initialized with Cloud Storage & Document Scope Selector.');
   }
 
   window.addEventListener('DOMContentLoaded', init);
