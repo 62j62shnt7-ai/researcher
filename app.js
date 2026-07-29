@@ -200,8 +200,8 @@
     }
   }
 
-  async function loadGoogleDriveFolder(folderId, statusCallback) {
-    if (!folderId) return 0;
+  async function loadGoogleDriveFolder(urlOrId, statusCallback) {
+    if (!urlOrId) return 0;
     const updateStatus = (msg, isErr = false) => {
       if (statusCallback) statusCallback(msg, isErr);
       else if (elements.settingsStatus) {
@@ -211,45 +211,72 @@
       }
     };
 
-    if (!state.apiKey) {
-      updateStatus('⚠️ Please enter your API Key above first to access Google Drive.', true);
-      return 0;
+    // Case 1: Direct File Link (e.g. https://drive.google.com/file/d/FILE_ID/view)
+    const fileMatch = urlOrId.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+    if (fileMatch) {
+      const fileId = fileMatch[1];
+      updateStatus(`📥 Downloading Google Drive PDF file...`);
+      const directUrl = `https://corsproxy.io/?https://drive.google.com/uc?export=download&id=${fileId}`;
+      try {
+        const res = await fetch(directUrl);
+        if (res.ok) {
+          const blob = await res.blob();
+          const fileObj = new File([blob], `Drive_Doc_${fileId.substring(0, 6)}.pdf`, { type: 'application/pdf' });
+          const docMeta = await processUploadedFile(fileObj);
+          updateLibraryUI();
+          populateDocScopeSelect();
+          updateStatus(`✅ Successfully imported ${docMeta.filename}!`);
+          return 1;
+        }
+      } catch (e) {
+        console.warn('Direct file download failed:', e);
+      }
     }
 
-    updateStatus('🔄 Querying Google Drive folder contents...');
+    // Case 2: Folder Link (e.g. https://drive.google.com/drive/folders/FOLDER_ID)
+    const folderMatch = urlOrId.match(/\/folders\/([a-zA-Z0-9_-]+)/) || [null, urlOrId];
+    const folderId = folderMatch[1] || urlOrId;
+
+    updateStatus('🔄 Querying Google Drive public folder view...');
+
+    const embedUrl = `https://corsproxy.io/?https://drive.google.com/embeddedfolderview?id=${folderId}`;
     try {
-      const apiUrl = `https://www.googleapis.com/drive/v3/files?q='${folderId}'+in+parents+and+trashed%3Dfalse&fields=files(id%2Cname%2CmimeType)&key=${state.apiKey}`;
-      const res = await fetch(apiUrl);
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error?.message || `HTTP ${res.status}`);
+      const res = await fetch(embedUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const htmlText = await res.text();
+
+      // Extract file IDs and names from public folderview HTML
+      const matches = Array.from(htmlText.matchAll(/class="drive-viewer-entry"[^>]*id="entry-([^"]+)"[^>]*>[\s\S]*?<div class="drive-viewer-entry-title">([^<]+)<\/div>/g));
+      
+      let fileList = matches.map(m => ({ id: m[1], name: m[2] }));
+
+      if (fileList.length === 0) {
+        const idMatches = Array.from(htmlText.matchAll(/id="entry-([a-zA-Z0-9_-]+)"/g));
+        fileList = idMatches.map((m, idx) => ({ id: m[1], name: `Drive_Doc_${idx + 1}.pdf` }));
       }
 
-      const data = await res.json();
-      const files = data.files || [];
-
-      if (files.length === 0) {
-        updateStatus('⚠️ Google Drive folder is empty or not shared as "Anyone with the link can view".', true);
+      if (fileList.length === 0) {
+        updateStatus('⚠️ Could not parse files in Google Drive folder. Ensure folder is set to "Anyone with the link can view".', true);
         return 0;
       }
 
-      updateStatus(`📥 Found ${files.length} file(s). Downloading & parsing PDF codes...`);
+      updateStatus(`📥 Found ${fileList.length} document(s). Downloading & indexing...`);
       let successCount = 0;
 
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        updateStatus(`📥 Parsing (${i + 1}/${files.length}): ${file.name}...`);
-        const downloadUrl = `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media&key=${state.apiKey}`;
+      for (let i = 0; i < fileList.length; i++) {
+        const item = fileList[i];
+        updateStatus(`📥 Parsing (${i + 1}/${fileList.length}): ${item.name}...`);
+        const downloadUrl = `https://corsproxy.io/?https://drive.google.com/uc?export=download&id=${item.id}`;
         try {
           const fileRes = await fetch(downloadUrl);
           if (fileRes.ok) {
             const blob = await fileRes.blob();
-            const fileObj = new File([blob], file.name, { type: file.mimeType });
+            const fileObj = new File([blob], item.name, { type: 'application/pdf' });
             await processUploadedFile(fileObj);
             successCount++;
           }
         } catch (err) {
-          console.warn(`Could not download drive file ${file.name}:`, err);
+          console.warn(`Could not download file ${item.name}:`, err);
         }
       }
 
@@ -258,7 +285,7 @@
       updateStatus(`✅ Successfully imported ${successCount} document(s) from Google Drive!`);
       return successCount;
     } catch (e) {
-      updateStatus(`❌ Google Drive Fetch Failed: ${e.message}. Ensure folder is shared as "Anyone with link".`, true);
+      updateStatus(`❌ Could not fetch Google Drive folder. Check folder link sharing settings.`, true);
       return 0;
     }
   }
