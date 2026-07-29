@@ -1,0 +1,6 @@
+# OCR extras for scanned PDF pages (optional — the app runs fine without them).
+# rapidocr 3.x + onnxruntime supports Python 3.10 through 3.14.
+pypdfium2>=4.30
+pillow>=10.0
+rapidocr>=3.0
+onnxruntime>=1.23

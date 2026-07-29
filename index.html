@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Researcher AI — Engineering Codes & Standards</title>
+  <meta name="description" content="Instant hybrid search & RAG chat for engineering codes, standards, and datasheets powered by Google Gemini.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <!-- PDF.js for client-side PDF parsing -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <!-- Mammoth.js for client-side DOCX parsing -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+  <!-- Marked.js for markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+  <div id="app" class="app-container">
+    <!-- Top Header -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="logo-icon">⚡</div>
+        <div class="brand-text">
+          <h1>Researcher AI</h1>
+          <span class="sub-title">Engineering Codes & Standards</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button id="btn-upload" class="btn btn-secondary" title="Upload Code to Device">
+          <span class="icon">➕</span>
+          <span class="btn-text">Upload Code</span>
+        </button>
+        <button id="btn-library" class="btn btn-secondary" title="View Library">
+          <span class="icon">📚</span>
+          <span class="btn-text">Library (<span id="lib-count">0</span>)</span>
+        </button>
+        <button id="btn-settings" class="btn btn-primary" title="Gemini Settings">
+          <span class="icon">⚙️</span>
+          <span class="btn-text">Settings</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="main-layout">
+      <!-- Search & Filters Bar -->
+      <section class="search-section">
+        <div class="search-wrapper">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="search-input" placeholder="Search codes (e.g. 'ASME B31.3 Para 304.1' or 'pipe wall thickness')..." autocomplete="off">
+          <button id="search-clear-btn" class="search-clear-btn hidden">&times;</button>
+        </div>
+        <div class="filter-pills">
+          <button class="pill active" data-filter="all">All Codes</button>
+          <button class="pill" data-filter="repo">GitHub Standards</button>
+          <button class="pill" data-filter="local">Uploaded Codes</button>
+        </div>
+      </section>
+
+      <!-- Instant Search Results (Collapsible) -->
+      <section id="search-results-section" class="search-results-section hidden">
+        <div class="results-header">
+          <h2>Search Results (<span id="results-count">0</span>)</h2>
+          <button id="close-results-btn" class="btn-text-only">Close Search</button>
+        </div>
+        <div id="results-list" class="results-list"></div>
+      </section>
+
+      <!-- Chat Interface -->
+      <section class="chat-section">
+        <div id="chat-messages" class="chat-messages">
+          <!-- Welcome Message -->
+          <div class="message system-message">
+            <div class="message-avatar">⚡</div>
+            <div class="message-body">
+              <h3>Welcome to Researcher AI!</h3>
+              <p>Search and chat with your engineering codes, standards, and technical specifications right from your phone or desktop.</p>
+              <div class="quick-starts">
+                <p><strong>Quick Steps:</strong></p>
+                <ul>
+                  <li>⚙️ Click <strong>Settings</strong> to add your <strong>Google Gemini API Key</strong>.</li>
+                  <li>📚 Standard codes in your GitHub repository are pre-indexed automatically.</li>
+                  <li>➕ Tap <strong>Upload Code</strong> to add new PDFs/documents locally on your phone.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chat Input Form -->
+        <form id="chat-form" class="chat-input-form">
+          <div class="chat-input-wrapper">
+            <textarea id="chat-input" placeholder="Ask a question about your codes & standards..." rows="1" required></textarea>
+            <button type="submit" id="btn-send" class="btn-send" title="Send message">
+              <span>➔</span>
+            </button>
+          </div>
+          <div class="chat-controls">
+            <label class="toggle-control">
+              <input type="checkbox" id="use-rag-toggle" checked>
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">Use Engineering Library (RAG)</span>
+            </label>
+            <div class="model-select-wrapper">
+              <select id="model-select" class="model-select">
+                <option value="gemini-2.5-flash">Gemini 2.5 Flash (Fast & Accurate)</option>
+                <option value="gemini-1.5-flash">Gemini 1.5 Flash</option>
+                <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+              </select>
+            </div>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <!-- Hidden File Input for Local Uploads -->
+    <input type="file" id="file-input" accept=".pdf,.docx,.txt,.csv,.md" multiple style="display:none">
+
+    <!-- Modal: Settings -->
+    <div id="settings-modal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2>⚙️ Gemini API Configuration</h2>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="api-key-input">Gemini API Key</label>
+            <input type="password" id="api-key-input" placeholder="AIzaSy..." autocomplete="off">
+            <small>Stored locally in your browser. Never uploaded anywhere else.</small>
+          </div>
+          <div id="settings-status" class="status-msg hidden"></div>
+        </div>
+        <div class="modal-footer">
+          <button id="btn-test-key" class="btn btn-secondary">Test Connection</button>
+          <button id="btn-save-key" class="btn btn-primary">Save Settings</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Library Manager -->
+    <div id="library-modal" class="modal-backdrop hidden">
+      <div class="modal-card modal-large">
+        <div class="modal-header">
+          <h2>📚 Engineering Code Library</h2>
+          <button class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="library-sections">
+            <div class="lib-column">
+              <h3>GitHub Standards (Repository)</h3>
+              <div id="repo-docs-list" class="docs-list">Loading repository index...</div>
+            </div>
+            <div class="lib-column">
+              <h3>Your Uploaded Codes (Device)</h3>
+              <div id="local-docs-list" class="docs-list">No local documents uploaded yet.</div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button id="btn-export-db" class="btn btn-secondary">Export Backup JSON</button>
+          <button id="btn-import-db" class="btn btn-secondary">Import Backup JSON</button>
+          <input type="file" id="import-db-input" accept=".json" style="display:none">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

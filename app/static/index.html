@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Researcher — Document Chat</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+<style>
+:root{
+  --bg:#0f1216; --panel:#161b22; --panel2:#1c232c; --border:#2a3340;
+  --text:#dbe2ea; --muted:#8b98a8; --accent:#4f9cf9; --accent2:#2e6fc4;
+  --good:#3fb96f; --warn:#d9a23c; --bad:#e0635c; --radius:10px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;overflow:hidden}
+button{cursor:pointer;font-family:inherit}
+/* ---------- sidebar ---------- */
+#sidebar{width:300px;min-width:300px;background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column}
+#sidebar header{padding:16px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
+#sidebar h1{font-size:17px;font-weight:600}
+#sidebar h1 span{color:var(--accent)}
+#gearBtn{background:none;border:none;color:var(--muted);font-size:18px}
+#gearBtn:hover{color:var(--text)}
+#uploadZone{margin:12px;padding:18px;border:1.5px dashed var(--border);border-radius:var(--radius);text-align:center;color:var(--muted);font-size:13px;cursor:pointer;transition:.15s}
+#uploadZone:hover,#uploadZone.drag{border-color:var(--accent);color:var(--accent)}
+#docList{flex:1;overflow-y:auto;padding:0 8px 12px}
+.doc{padding:9px 10px;margin:4px;border-radius:8px;background:var(--panel2);font-size:13px;display:flex;align-items:center;gap:8px}
+.doc input[type=checkbox]{accent-color:var(--accent);cursor:pointer;flex-shrink:0}
+.doc.excluded{opacity:.45}
+#selBar{padding:2px 14px 6px;font-size:11px;color:var(--muted);display:flex;gap:10px;align-items:center}
+#selBar a{color:var(--accent);cursor:pointer;text-decoration:none}
+.secHead{padding:10px 16px 2px;font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+#chatList{max-height:26vh;overflow-y:auto;padding:0 8px;flex-shrink:0}
+.chatItem{padding:7px 10px;margin:3px 4px;border-radius:8px;font-size:12.5px;cursor:pointer;display:flex;gap:6px;align-items:center}
+.chatItem:hover{background:var(--panel2)}
+.chatItem.active{background:var(--panel2);outline:1px solid var(--border)}
+.chatItem .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.chatItem button{background:none;border:none;color:var(--muted);font-size:12px;padding:2px}
+.chatItem button:hover{color:var(--bad)}
+mark{background:rgba(217,162,60,.35);color:inherit;border-radius:2px;padding:0 1px}
+a.cite{color:var(--accent);text-decoration:none;font-weight:600}
+a.cite:hover{text-decoration:underline}
+.src .head a{color:var(--accent);text-decoration:none}
+.src .head a:hover{text-decoration:underline}
+.msgTools{margin-top:8px;display:flex;gap:8px}
+.msgTools button,.src .head button{background:var(--panel2);border:1px solid var(--border);color:var(--muted);padding:3px 10px;border-radius:6px;font-size:11px;cursor:pointer}
+.msgTools button:hover,.src .head button:hover{color:var(--text);border-color:var(--accent)}
+#collectionFilter{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:6px;font-size:11px;padding:2px 6px;max-width:110px}
+#watchList .wf{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:5px 10px;margin-top:4px;font-size:12px}
+#watchList .wf span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#watchList .wf button{background:none;border:none;color:var(--muted);cursor:pointer}
+#watchList .wf button:hover{color:var(--bad)}
+#browseBg{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:60}
+#browseBg.open{display:flex}
+#browseBox{background:var(--panel);border:1px solid var(--border);border-radius:14px;width:480px;max-width:90vw;max-height:70vh;display:flex;flex-direction:column;padding:18px}
+#browsePath{font-size:12px;color:var(--accent);margin-bottom:8px;word-break:break-all}
+#browseDirs{flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:8px;background:var(--panel2)}
+.bdir{padding:7px 12px;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border)}
+.bdir:hover{background:var(--bg)}
+#browseActions{display:flex;gap:8px;justify-content:flex-end;margin-top:12px}
+#browseActions button{padding:7px 14px;border-radius:8px;font-size:13px;border:1px solid var(--border);background:var(--panel2);color:var(--text);cursor:pointer}
+#browseActions .primary{background:var(--accent);border-color:var(--accent);color:#fff}
+#tpsWrap{margin-left:8px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.doc .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.doc .meta{font-size:11px;color:var(--muted)}
+.badge{font-size:10px;padding:2px 7px;border-radius:99px;white-space:nowrap}
+.b-ready{background:rgba(63,185,111,.15);color:var(--good)}
+.b-busy{background:rgba(79,156,249,.15);color:var(--accent)}
+.b-kw{background:rgba(217,162,60,.15);color:var(--warn)}
+.b-err{background:rgba(224,99,92,.15);color:var(--bad)}
+.doc button{background:none;border:none;color:var(--muted);font-size:13px;padding:2px}
+.doc button:hover{color:var(--bad)}
+#stats{padding:10px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--muted)}
+/* ---------- main ---------- */
+#main{flex:1;display:flex;flex-direction:column;min-width:0}
+#topbar{padding:10px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
+#topbar .status{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--muted)}
+.dot.ok{background:var(--good)} .dot.bad{background:var(--bad)}
+#newChat{margin-left:auto;background:var(--panel2);border:1px solid var(--border);color:var(--text);padding:6px 14px;border-radius:8px;font-size:13px}
+#newChat:hover{border-color:var(--accent)}
+#chat{flex:1;overflow-y:auto;padding:24px 0}
+.msg{max-width:820px;margin:0 auto 18px;padding:0 24px;display:flex;gap:12px}
+.msg .avatar{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;font-weight:600}
+.msg.user .avatar{background:var(--accent2);color:#fff}
+.msg.assistant .avatar{background:var(--panel2);color:var(--accent)}
+.msg .body{flex:1;min-width:0;font-size:14.5px;line-height:1.65}
+.msg .body p{margin:0 0 10px} .msg .body p:last-child{margin:0}
+.msg .body pre{background:var(--panel);border:1px solid var(--border);padding:12px;border-radius:8px;overflow-x:auto;font-size:13px;margin:8px 0}
+.msg .body code{background:var(--panel);padding:1px 5px;border-radius:4px;font-size:13px}
+.msg .body pre code{background:none;padding:0}
+.msg .body table{border-collapse:collapse;margin:8px 0;font-size:13px}
+.msg .body th,.msg .body td{border:1px solid var(--border);padding:5px 10px}
+.msg .body ul,.msg .body ol{margin:4px 0 10px 22px}
+.msg .body h1,.msg .body h2,.msg .body h3{margin:12px 0 6px;font-size:15px}
+.sources{margin-top:10px;font-size:12px}
+.sources summary{color:var(--muted);cursor:pointer;user-select:none}
+.src{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-top:6px}
+.src .head{color:var(--accent);font-weight:600;margin-bottom:3px}
+.src .txt{color:var(--muted);white-space:pre-wrap}
+.errbox{background:rgba(224,99,92,.1);border:1px solid var(--bad);border-radius:8px;padding:10px 12px;color:var(--bad);font-size:13px}
+#welcome{max-width:600px;margin:80px auto;text-align:center;color:var(--muted)}
+#welcome h2{color:var(--text);font-size:22px;margin-bottom:10px}
+#welcome .hint{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin:8px 0;font-size:13px;text-align:left;cursor:pointer}
+#welcome .hint:hover{border-color:var(--accent)}
+/* ---------- composer ---------- */
+#composer{padding:14px 24px 20px;border-top:1px solid var(--border)}
+#composerInner{max-width:820px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
+#input{flex:1;background:var(--panel2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);padding:12px 14px;font-size:14.5px;font-family:inherit;resize:none;max-height:160px;outline:none}
+#input:focus{border-color:var(--accent)}
+#sendBtn{background:var(--accent);border:none;color:#fff;width:44px;height:44px;border-radius:var(--radius);font-size:17px}
+#sendBtn:disabled{opacity:.4;cursor:default}
+#libToggle{max-width:820px;margin:8px auto 0;font-size:12px;color:var(--muted);display:flex;gap:6px;align-items:center}
+/* ---------- modal ---------- */
+#modalBg{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}
+#modalBg.open{display:flex}
+#modal{background:var(--panel);border:1px solid var(--border);border-radius:14px;width:560px;max-width:92vw;max-height:88vh;overflow-y:auto;padding:24px}
+#modal h2{font-size:17px;margin-bottom:16px}
+#modal h3{font-size:13px;color:var(--accent);margin:18px 0 8px;text-transform:uppercase;letter-spacing:.5px}
+.field{margin-bottom:10px}
+.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+.field input,.field select{width:100%;background:var(--panel2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px 10px;font-size:13px;outline:none}
+.field input:focus,.field select:focus{border-color:var(--accent)}
+.modelPick{display:flex;gap:8px}.modelPick input{flex:1}.modelPick select{width:42%;min-width:150px}
+.row{display:flex;gap:10px}.row .field{flex:1}
+.testline{font-size:12px;margin:4px 0 0;min-height:16px}
+.testline.ok{color:var(--good)}.testline.bad{color:var(--bad)}
+#modal .actions{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
+#modal .actions button{padding:8px 18px;border-radius:8px;font-size:13px;border:1px solid var(--border);background:var(--panel2);color:var(--text)}
+#modal .actions .primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.smallbtn{background:var(--panel2);border:1px solid var(--border);color:var(--muted);padding:4px 10px;border-radius:6px;font-size:11px;margin-top:4px}
+.smallbtn:hover{color:var(--text);border-color:var(--accent)}
+.smallbtn:disabled{opacity:.5;cursor:default}
+#depLog{display:none;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-top:6px;max-height:150px;overflow-y:auto;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--muted);white-space:pre-wrap}
+.typing{display:inline-block;color:var(--muted)}
+@media (max-width:760px){#sidebar{display:none}}
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <header>
+    <h1>Re<span>search</span>er</h1>
+    <button id="gearBtn" title="Settings">⚙</button>
+  </header>
+  <div id="uploadZone">⬆ Drop documents here or click to browse<br><span style="font-size:11px">PDF · Word · Excel · PowerPoint · text</span></div>
+  <input type="file" id="fileInput" multiple hidden
+         accept=".pdf,.docx,.xlsx,.xlsm,.csv,.tsv,.pptx,.txt,.md,.markdown,.rst,.html,.htm,.log">
+  <div class="secHead">Chat history</div>
+  <div id="chatList"></div>
+  <div class="secHead">Documents</div>
+  <div id="selBar"><span id="selInfo"></span><a onclick="selectAll(true)">all</a><a onclick="selectAll(false)">none</a><select id="collectionFilter" onchange="collectionChanged()" title="Filter by collection"><option value="">all collections</option></select></div>
+  <div id="docList"></div>
+  <div id="stats"></div>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <div class="status"><div class="dot" id="chatDot"></div><span id="chatStatus">checking AI…</span></div>
+    <div class="status"><div class="dot" id="embDot"></div><span id="embStatus">checking embeddings…</span></div>
+    <span id="tpsWrap"></span>
+    <button id="newChat">+ New chat</button>
+  </div>
+  <div id="chat">
+    <div id="welcome">
+      <h2>Chat with your codes &amp; standards</h2>
+      <p>Upload documents on the left, then ask anything. Answers cite the exact source and page.</p>
+      <div class="hint" onclick="useHint(this)">What is the design factor for restrained pipelines?</div>
+      <div class="hint" onclick="useHint(this)">Summarize the hydrotest requirements across my documents.</div>
+      <div class="hint" onclick="useHint(this)">Which clause covers welding qualification for duplex stainless?</div>
+    </div>
+  </div>
+  <div id="composer">
+    <div id="composerInner">
+      <textarea id="input" rows="1" placeholder="Ask about your documents…  (Enter to send, Shift+Enter for newline)"></textarea>
+      <button id="sendBtn" title="Send">➤</button>
+    </div>
+    <label id="libToggle"><input type="checkbox" id="useLibrary" checked> Use document library (RAG)
+      &nbsp;&nbsp;<input type="checkbox" id="compareMode"> Compare selected docs (tick 2+ documents)</label>
+  </div>
+</div>
+
+<div id="browseBg">
+  <div id="browseBox">
+    <h2 style="font-size:15px;margin-bottom:10px">Choose a folder</h2>
+    <div id="browsePath"></div>
+    <div id="browseDirs"></div>
+    <div id="browseActions">
+      <button id="browseUp">↑ Up</button>
+      <button id="browseCancel">Cancel</button>
+      <button class="primary" id="browseSelect">Select this folder</button>
+    </div>
+  </div>
+</div>
+
+<div id="modalBg">
+  <div id="modal">
+    <h2>Settings</h2>
+    <h3>Chat AI (the engine)</h3>
+    <div class="field"><label>Provider</label>
+      <select id="s_provider">
+        <option value="openai-compatible">OpenAI-compatible (LM Studio, Ollama, OpenAI, Groq…)</option>
+        <option value="anthropic">Anthropic (Claude)</option>
+      </select>
+    </div>
+    <div class="field"><label>Base URL</label><input id="s_base" placeholder="http://localhost:1234/v1"></div>
+    <div class="row">
+      <div class="field"><label>API key (blank for local)</label><input id="s_key" type="password"></div>
+      <div class="field"><label>Model (blank = server default)</label>
+        <div class="modelPick">
+          <input id="s_model" list="modelList" placeholder="type or fetch models">
+          <select id="s_modelSelect" disabled><option value="">Fetch models…</option></select>
+        </div>
+        <datalist id="modelList"></datalist>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Model context length (tokens) — match LM Studio's setting</label><input id="s_ctx" type="number" min="2048" step="1024"></div>
+      <div class="field"><label>Max response tokens</label><input id="s_maxtok" type="number" min="256" step="256"></div>
+    </div>
+    <button class="smallbtn" id="testChatBtn">Test connection &amp; fetch models</button>
+    <div class="testline" id="chatTest"></div>
+
+    <h3>Embeddings (for semantic search)</h3>
+    <div class="field"><label><input type="checkbox" id="s_embEnabled" style="width:auto"> Enable vector search (recommended — load an embedding model like nomic-embed-text in LM Studio)</label></div>
+    <div class="field"><label>Embeddings base URL</label><input id="s_embBase" placeholder="http://localhost:1234/v1"></div>
+    <div class="row">
+      <div class="field"><label>API key</label><input id="s_embKey" type="password"></div>
+      <div class="field"><label>Embedding model</label><input id="s_embModel" placeholder="e.g. text-embedding-nomic-embed-text-v1.5"></div>
+    </div>
+    <button class="smallbtn" id="testEmbBtn">Test embeddings</button>
+    <div class="testline" id="embTest"></div>
+
+    <h3>Retrieval</h3>
+    <div class="row">
+      <div class="field"><label>Excerpts per answer (top-k)</label><input id="s_topk" type="number" min="2" max="30"></div>
+      <div class="field"><label>Vector weight 0–1 (vs keyword)</label><input id="s_vw" type="number" min="0" max="1" step="0.1"></div>
+    </div>
+    <h3>Watch folders</h3>
+    <div class="field">
+      <label>Folders scanned for new/changed documents</label>
+      <div id="watchList"></div>
+      <div style="display:flex;gap:8px;margin-top:6px;align-items:center">
+        <button class="smallbtn" id="addWatchBtn">+ Add folder…</button>
+        <button class="smallbtn" id="scanNowBtn">⟳ Scan now</button>
+        <label style="font-size:12px;color:var(--muted)"><input type="checkbox" id="s_watchAuto" style="width:auto"> also scan automatically every minute</label>
+      </div>
+      <div class="testline" id="scanResult"></div>
+    </div>
+
+    <h3>Maintenance</h3>
+    <button class="smallbtn" id="updateDepsBtn">Check &amp; update dependencies</button>
+    <div class="testline" id="depStatus"></div>
+    <pre id="depLog"></pre>
+
+    <div class="actions">
+      <button id="cancelBtn">Cancel</button>
+      <button class="primary" id="saveBtn">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let history = [];   // [{role, content}]
+let busy = false;
+
+marked.setOptions({breaks:true});
+
+// ---------- documents ----------
+let docSel = {};   // doc_id -> included in chat scope (default true)
+function selectedDocIds(){ return Object.keys(docSel).filter(id=>docSel[id]).map(Number); }
+function chatDocIds(){
+  const sel = selectedDocIds();
+  // all selected (or none) -> no filter, search the whole library
+  return (sel.length === 0 || sel.length === Object.keys(docSel).length) ? null : sel;
+}
+function updateSelInfo(){
+  const total = Object.keys(docSel).length, sel = selectedDocIds().length;
+  $('selInfo').textContent = total ? `chat scope: ${sel===total?'all':sel+'/'+total} docs ·` : '';
+}
+function toggleSel(id, v){
+  docSel[id] = v;
+  document.querySelector(`.doc[data-id="${id}"]`)?.classList.toggle('excluded', !v);
+  updateSelInfo();
+}
+function selectAll(v){
+  for(const id in docSel) docSel[id] = v;
+  document.querySelectorAll('.doc').forEach(el=>el.classList.toggle('excluded', !v));
+  document.querySelectorAll('.doc input[type=checkbox]').forEach(cb=>cb.checked=v);
+  updateSelInfo();
+}
+
+let lastDocs = [];
+let collectionFilter = '';
+async function refreshDocs(){
+  const r = await fetch('/api/documents'); const data = await r.json();
+  lastDocs = data.documents;
+  const list = $('docList'); list.innerHTML = '';
+  let processing = false;
+  const seen = new Set();
+  // collection filter options
+  const cols = [...new Set(data.documents.map(d=>d.collection).filter(Boolean))].sort();
+  $('collectionFilter').innerHTML = '<option value="">all collections</option>' +
+    cols.map(c=>`<option value="${esc(c)}" ${c===collectionFilter?'selected':''}>${esc(c)}</option>`).join('');
+  if(collectionFilter && !cols.includes(collectionFilter)) collectionFilter = '';
+  for(const d of data.documents){
+    seen.add(String(d.id));
+    if(!(d.id in docSel)) docSel[d.id] = !collectionFilter || d.collection===collectionFilter;
+    if(collectionFilter && d.collection!==collectionFilter) continue;   // hidden by filter
+    const div = document.createElement('div');
+    div.className = 'doc' + (docSel[d.id] ? '' : ' excluded');
+    div.dataset.id = d.id;
+    let badge, cls;
+    if(d.status==='ready'){badge='ready';cls='b-ready';}
+    else if(d.status==='ready_keyword_only'){badge='keyword only';cls='b-kw';}
+    else if(d.status==='error'){badge='error';cls='b-err';}
+    else {badge=d.status+'…';cls='b-busy';processing=true;}
+    const meta = (d.chunk_count ? `${d.chunk_count} chunks${d.pages?` · ${d.pages} pp`:''}` : (d.format||''))
+               + (d.collection ? ` · 🏷 ${esc(d.collection)}` : '');
+    div.innerHTML = `<input type="checkbox" title="Include in chat" ${docSel[d.id]?'checked':''} onchange="toggleSel(${d.id}, this.checked)">
+      <div style="flex:1;min-width:0">
+        <div class="name" title="${esc(d.filename)}${d.error?' — '+esc(d.error):''}">${esc(d.filename)}</div>
+        <div class="meta">${meta}</div></div>
+      <span class="badge ${cls}" ${d.error?`title="${esc(d.error)}"`:''}>${badge}</span>
+      <button title="Set collection/project" onclick="setDocCollection(${d.id})">🏷</button>
+      <button title="Re-index" onclick="reindexDoc(${d.id})">↻</button>
+      <button title="Delete" onclick="deleteDoc(${d.id})">✕</button>`;
+    list.appendChild(div);
+  }
+  for(const id in docSel) if(!seen.has(id)) delete docSel[id];   // drop deleted docs
+  updateSelInfo();
+  const s = data.stats;
+  $('stats').textContent = `${s.documents} documents · ${s.chunks} chunks · ${s.vectors} vectors`;
+  if(processing) setTimeout(refreshDocs, 2500);
+}
+async function setDocCollection(id){
+  const d = lastDocs.find(x=>x.id===id);
+  const name = prompt('Collection / project name (leave empty to clear):', d?.collection||'');
+  if(name===null) return;
+  await fetch(`/api/documents/${id}/collection`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  refreshDocs();
+}
+function collectionChanged(){
+  collectionFilter = $('collectionFilter').value;
+  // scope chat to the chosen collection
+  for(const d of lastDocs) docSel[d.id] = !collectionFilter || d.collection===collectionFilter;
+  refreshDocs();
+}
+async function deleteDoc(id){ if(!confirm('Remove this document from the library?'))return;
+  await fetch('/api/documents/'+id,{method:'DELETE'}); refreshDocs(); }
+async function reindexDoc(id){ await fetch(`/api/documents/${id}/reindex`,{method:'POST'}); refreshDocs(); }
+
+// upload
+const zone = $('uploadZone'), fi = $('fileInput');
+zone.onclick = () => fi.click();
+fi.onchange = () => uploadFiles(fi.files);
+zone.ondragover = e => {e.preventDefault(); zone.classList.add('drag');};
+zone.ondragleave = () => zone.classList.remove('drag');
+zone.ondrop = e => {e.preventDefault(); zone.classList.remove('drag'); uploadFiles(e.dataTransfer.files);};
+async function uploadFiles(files){
+  if(!files.length) return;
+  const fd = new FormData();
+  for(const f of files) fd.append('files', f);
+  zone.textContent = 'Uploading…';
+  try{ await fetch('/api/upload',{method:'POST',body:fd}); }
+  finally{
+    zone.innerHTML = '⬆ Drop documents here or click to browse<br><span style="font-size:11px">PDF · Word · Excel · PowerPoint · text</span>';
+    fi.value=''; refreshDocs();
+  }
+}
+
+// ---------- status ----------
+async function checkStatus(){
+  try{
+    const r = await fetch('/api/test/chat'); const d = await r.json();
+    $('chatDot').className = 'dot ' + (d.ok?'ok':'bad');
+    $('chatStatus').textContent = d.ok ? 'AI connected' : 'AI offline — check Settings';
+  }catch{ $('chatDot').className='dot bad'; $('chatStatus').textContent='AI offline'; }
+  try{
+    const r = await fetch('/api/test/embeddings'); const d = await r.json();
+    $('embDot').className = 'dot ' + (d.ok?'ok':'bad');
+    $('embStatus').textContent = d.ok ? 'vector search on' : 'keyword search only';
+  }catch{ $('embDot').className='dot bad'; $('embStatus').textContent='keyword search only'; }
+}
+
+// ---------- chat ----------
+function esc(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+// reasoning models (Qwen3, DeepSeek-R1...) wrap hidden reasoning in <think> tags — strip it
+function stripThink(t){ return t.replace(/<think>[\s\S]*?(<\/think>|$)/g,'').trim(); }
+function addMsg(role, html){
+  $('welcome')?.remove();
+  const div = document.createElement('div'); div.className = 'msg '+role;
+  div.innerHTML = `<div class="avatar">${role==='user'?'You':'AI'}</div><div class="body">${html}</div>`;
+  $('chat').appendChild(div);
+  $('chat').scrollTop = $('chat').scrollHeight;
+  return div.querySelector('.body');
+}
+let lastQuestion = '';
+let srcSeq = 0; const srcStore = {};
+function pageOf(loc){ const m = /p\.\s*(\d+)/.exec(loc||''); return m ? +m[1] : null; }
+function fileLink(s){
+  const pg = pageOf(s.location);
+  return pg !== null ? `/api/documents/${s.doc_id}/file#page=${pg}` : `/api/documents/${s.doc_id}/file`;
+}
+// escape + highlight the current question's terms
+function hlEsc(text){
+  let h = esc(text);
+  const toks = [...new Set(((lastQuestion||'').match(/[A-Za-z0-9_.\-]{3,}/g)||[]).map(t=>t.toLowerCase()))];
+  for(const t of toks.slice(0,12)){
+    const re = new RegExp('('+t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi');
+    h = h.replace(re,'<mark>$1</mark>');
+  }
+  return h;
+}
+function renderSources(container, sources){
+  if(!sources || !sources.length) return;
+  const det = document.createElement('details'); det.className = 'sources';
+  let html = `<summary>📄 ${sources.length} source excerpt${sources.length>1?'s':''}</summary>`;
+  for(const s of sources){
+    const head = `[${s.n}] ${esc(s.filename)}${s.location?' — '+esc(s.location):''}`;
+    const pg = pageOf(s.location);
+    const link = `<a href="${fileLink(s)}" target="_blank" title="${pg!==null?'Open document at page '+pg:'Open document'}">${head} ↗</a>`;
+    const hasTable = (s.text.match(/^.*\|.*\|.*$/gm)||[]).length >= 2;
+    let tblBtn = '';
+    if(hasTable){ const sid = ++srcSeq; srcStore[sid] = s.text; tblBtn = ` <button onclick="exportTable(${sid})" title="Extract table rows to Excel">table → Excel</button>`; }
+    html += `<div class="src"><div class="head">${link}${tblBtn}</div><div class="txt">${hlEsc(s.text)}</div></div>`;
+  }
+  det.innerHTML = html;
+  container.appendChild(det);
+}
+// make [n] citations in the answer clickable -> open document at cited page
+function linkifyCites(el, sources){
+  if(!sources || !sources.length) return;
+  el.innerHTML = el.innerHTML.replace(/\[(\d{1,2})\]/g, (m,n)=>{
+    const s = sources.find(x=>x.n==n);
+    return s ? `<a class="cite" href="${fileLink(s)}" target="_blank" title="${esc(s.filename)}${s.location?' — '+esc(s.location):''}">[${n}]</a>` : m;
+  });
+}
+async function downloadBlob(url, body, name){
+  const r = await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!r.ok){ alert('Export failed'); return; }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(await r.blob()); a.download = name; a.click();
+  URL.revokeObjectURL(a.href);
+}
+function exportTable(sid){ downloadBlob('/api/export/table', {text: srcStore[sid]}, 'table.xlsx'); }
+function addMsgTools(bodyEl, content, sources){
+  const div = document.createElement('div'); div.className = 'msgTools';
+  const btn = document.createElement('button'); btn.textContent = '⬇ Export .docx';
+  btn.onclick = ()=>downloadBlob('/api/export/answer', {content, sources}, 'answer.docx');
+  div.appendChild(btn);
+  bodyEl.appendChild(div);
+}
+
+// ---------- chat history ----------
+let currentChatId = null;
+async function refreshChats(){
+  const d = await (await fetch('/api/chats')).json();
+  const el = $('chatList'); el.innerHTML = '';
+  for(const ch of d.chats){
+    const div = document.createElement('div');
+    div.className = 'chatItem' + (ch.id===currentChatId?' active':'');
+    div.innerHTML = `<span class="t" title="${esc(ch.title)} — double-click to rename">${esc(ch.title)}</span>
+      <button title="Delete chat" onclick="event.stopPropagation();deleteChat(${ch.id})">✕</button>`;
+    div.onclick = ()=>loadChat(ch.id);
+    div.ondblclick = async ()=>{
+      const t = prompt('Rename chat:', ch.title);
+      if(t && t.trim()){
+        await fetch(`/api/chats/${ch.id}/rename`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:t.trim()})});
+        refreshChats();
+      }
+    };
+    el.appendChild(div);
+  }
+}
+async function loadChat(id){
+  if(busy) aborter?.abort();
+  const d = await (await fetch('/api/chats/'+id)).json();
+  currentChatId = id;
+  history = d.messages.map(m=>({role:m.role, content:m.content}));
+  $('chat').innerHTML = '';
+  for(const m of d.messages){
+    if(m.role==='user'){ lastQuestion = m.content; addMsg('user', esc(m.content).replace(/\n/g,'<br>')); }
+    else {
+      const b = addMsg('assistant', marked.parse(m.content));
+      if(m.sources && m.sources.length){ linkifyCites(b, m.sources); renderSources(b, m.sources); }
+      addMsgTools(b, m.content, m.sources||[]);
+    }
+  }
+  refreshChats();
+}
+async function deleteChat(id){
+  if(!confirm('Delete this chat?')) return;
+  await fetch('/api/chats/'+id, {method:'DELETE'});
+  if(id===currentChatId){ currentChatId=null; history=[]; $('chat').innerHTML=''; }
+  refreshChats();
+}
+
+let aborter = null;
+async function send(){
+  const text = $('input').value.trim();
+  if(!text || busy) return;
+  busy = true;
+  lastQuestion = text;
+  if(!currentChatId){
+    try{
+      const r = await fetch('/api/chats',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({title:text.slice(0,60)})});
+      currentChatId = (await r.json()).id;
+    }catch{ currentChatId = null; }
+  }
+  $('sendBtn').textContent = '■'; $('sendBtn').title = 'Stop generating';
+  $('input').value = ''; autoGrow();
+  history.push({role:'user', content:text});
+  addMsg('user', esc(text).replace(/\n/g,'<br>'));
+  const body = addMsg('assistant', '<span class="typing">Searching library…</span>');
+  let answer = '', sources = [], gotError = false, aborted = false;
+  let nTok = 0, tokStart = 0;
+  $('tpsWrap').textContent = '';
+  aborter = new AbortController();
+  try{
+    const resp = await fetch('/api/chat', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({messages: history, use_library: $('useLibrary').checked, doc_ids: chatDocIds(),
+                            chat_id: currentChatId, compare: $('compareMode').checked}),
+      signal: aborter.signal
+    });
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += dec.decode(value, {stream:true});
+      const lines = buf.split('\n\n'); buf = lines.pop();
+      for(const line of lines){
+        if(!line.startsWith('data:')) continue;
+        let ev; try{ ev = JSON.parse(line.slice(5)); }catch{ continue; }
+        if(ev.type==='sources'){ sources = ev.sources; if(!answer) body.innerHTML = '<span class="typing">Thinking…</span>'; }
+        else if(ev.type==='delta'){
+          answer += ev.text;
+          nTok++;
+          if(!tokStart) tokStart = performance.now();
+          else if(nTok % 5 === 0){
+            const tps = nTok / ((performance.now()-tokStart)/1000);
+            $('tpsWrap').textContent = `⚡ ${tps.toFixed(1)} tok/s · ${nTok} tokens`;
+          }
+          const disp = stripThink(answer);
+          body.innerHTML = disp ? marked.parse(disp) : '<span class="typing">Reasoning…</span>';
+          $('chat').scrollTop = $('chat').scrollHeight;
+        }
+        else if(ev.type==='error'){ gotError = true; body.innerHTML = `<div class="errbox">${esc(ev.text)}</div>`; }
+        else if(ev.type==='warning'){ console.warn(ev.text); }
+      }
+    }
+  }catch(e){
+    if(e.name === 'AbortError'){
+      aborted = true;
+      const disp = stripThink(answer);
+      if(disp) body.innerHTML = marked.parse(disp) + '<p style="color:var(--muted);font-size:12px">⏹ stopped</p>';
+      else body.innerHTML = '<span style="color:var(--muted)">⏹ stopped</span>';
+    } else {
+      gotError = true;
+      body.innerHTML = `<div class="errbox">Request failed: ${esc(e.message)}</div>`;
+    }
+  }finally{
+    const finalAnswer = stripThink(answer);
+    if(finalAnswer){
+      history.push({role:'assistant', content:finalAnswer});
+      linkifyCites(body, sources);
+      renderSources(body, sources);
+      addMsgTools(body, finalAnswer, sources);
+    } else if(!gotError && !aborted && answer){
+      // model produced only <think> reasoning, no actual answer
+      body.innerHTML = '<div class="errbox">The model used its entire output on internal reasoning and produced no answer. Increase "Max response tokens" in Settings, or use a non-reasoning model.</div>';
+    }
+    busy = false; aborter = null;
+    if(nTok && tokStart){
+      const secs = (performance.now()-tokStart)/1000;
+      $('tpsWrap').textContent = `⚡ ${(nTok/Math.max(secs,0.001)).toFixed(1)} tok/s avg · ${nTok} tokens · ${secs.toFixed(1)}s`;
+    }
+    $('sendBtn').textContent = '➤'; $('sendBtn').title = 'Send';
+    $('chat').scrollTop = $('chat').scrollHeight;
+    refreshChats();
+  }
+}
+$('sendBtn').onclick = ()=>{ if(busy){ aborter?.abort(); } else { send(); } };
+$('input').addEventListener('keydown', e=>{
+  if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+});
+function autoGrow(){ const i=$('input'); i.style.height='auto'; i.style.height=Math.min(i.scrollHeight,160)+'px'; }
+$('input').addEventListener('input', autoGrow);
+$('newChat').onclick = ()=>{ history=[]; $('chat').innerHTML=''; currentChatId=null; refreshChats(); };
+function useHint(el){ $('input').value = el.textContent; $('input').focus(); autoGrow(); }
+
+// ---------- settings ----------
+let cfg = null;
+function setModelOptions(models){
+  const list = $('modelList'), sel = $('s_modelSelect');
+  const options = (models || []).filter(Boolean);
+  list.innerHTML = options.map(m=>`<option value="${esc(m)}">`).join('');
+  if(!options.length){
+    sel.innerHTML = '<option value="">No models found</option>';
+    sel.disabled = true;
+    return;
+  }
+  sel.innerHTML = '<option value="">Select model…</option>' +
+    options.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join('');
+  sel.disabled = false;
+  if($('s_model').value && options.includes($('s_model').value)) sel.value = $('s_model').value;
+}
+async function fetchChatModels(){
+  $('chatTest').textContent = 'Fetching models…'; $('chatTest').className='testline';
+  setModelOptions([]);
+  const resp = await fetch('/api/models', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      provider:$('s_provider').value,
+      base_url:$('s_base').value.trim(),
+      api_key:$('s_key').value.trim()
+    })
+  });
+  const d = await resp.json().catch(()=>null);
+  if(d && d.ok){
+    setModelOptions(d.models || []);
+    if(!$('s_model').value && d.models?.length) $('s_model').value = d.models[0];
+    $('chatTest').textContent = '✓ Connected'+(d.models?.length?` — ${d.models.length} models available`:' — no models returned');
+    $('chatTest').className='testline ok';
+  }else{
+    $('chatTest').textContent = '✗ '+((d&&(d.error||d.detail))||'Connection failed — check the base URL and that the server is running');
+    $('chatTest').className='testline bad';
+  }
+  return d;
+}
+async function openSettings(){
+  cfg = await (await fetch('/api/settings')).json();
+  $('s_provider').value = cfg.chat.provider;
+  $('s_base').value = cfg.chat.base_url;
+  $('s_key').value = cfg.chat.api_key;
+  $('s_model').value = cfg.chat.model;
+  setModelOptions([]);
+  $('s_ctx').value = cfg.chat.context_tokens || 8192;
+  $('s_maxtok').value = cfg.chat.max_tokens || 3000;
+  $('s_embEnabled').checked = cfg.embeddings.enabled;
+  $('s_embBase').value = cfg.embeddings.base_url;
+  $('s_embKey').value = cfg.embeddings.api_key;
+  $('s_embModel').value = cfg.embeddings.model;
+  $('s_topk').value = cfg.retrieval.top_k;
+  $('s_vw').value = cfg.retrieval.vector_weight;
+  watchFolders = ((cfg.watch&&cfg.watch.folders)||[]).slice();
+  $('s_watchAuto').checked = !!(cfg.watch&&cfg.watch.auto);
+  renderWatchList();
+  $('scanResult').textContent = '';
+  $('chatTest').textContent = ''; $('embTest').textContent = '';
+  $('modalBg').classList.add('open');
+}
+$('gearBtn').onclick = openSettings;
+$('cancelBtn').onclick = ()=> $('modalBg').classList.remove('open');
+$('modalBg').onclick = e=>{ if(e.target===$('modalBg')) $('modalBg').classList.remove('open'); };
+$('s_provider').onchange = ()=>{
+  if($('s_provider').value==='anthropic'){ $('s_base').value='https://api.anthropic.com'; $('s_model').value='claude-sonnet-4-6'; }
+  else { $('s_base').value='http://localhost:1234/v1'; $('s_model').value=''; }
+  setModelOptions([]);
+};
+$('s_modelSelect').onchange = ()=>{ if($('s_modelSelect').value) $('s_model').value = $('s_modelSelect').value; };
+$('s_base').addEventListener('input', ()=> setModelOptions([]));
+$('s_key').addEventListener('input', ()=> setModelOptions([]));
+$('saveBtn').onclick = async ()=>{
+  const body = {
+    chat:{ provider:$('s_provider').value, base_url:$('s_base').value.trim(), api_key:$('s_key').value.trim(),
+           model:$('s_model').value.trim(), temperature:cfg.chat.temperature,
+           max_tokens:+$('s_maxtok').value||3000, context_tokens:+$('s_ctx').value||8192 },
+    embeddings:{ enabled:$('s_embEnabled').checked, base_url:$('s_embBase').value.trim(),
+                 api_key:$('s_embKey').value.trim(), model:$('s_embModel').value.trim(), batch_size:cfg.embeddings.batch_size },
+    retrieval:{ top_k:+$('s_topk').value||8, vector_weight:Math.max(0,Math.min(1,+$('s_vw').value||0.6)),
+                chunk_size:cfg.retrieval.chunk_size, chunk_overlap:cfg.retrieval.chunk_overlap },
+    watch:{ folders:watchFolders.slice(), auto:$('s_watchAuto').checked,
+            interval:(cfg.watch&&cfg.watch.interval)||60 }
+  };
+  await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  $('modalBg').classList.remove('open');
+  checkStatus();
+};
+$('testChatBtn').onclick = async ()=>{
+  await fetchChatModels();
+};
+$('testEmbBtn').onclick = async ()=>{
+  $('embTest').textContent = 'Testing…'; $('embTest').className='testline';
+  const tmp = { embeddings:{ enabled:true, base_url:$('s_embBase').value.trim(), api_key:$('s_embKey').value.trim(), model:$('s_embModel').value.trim() } };
+  await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(tmp)});
+  const d = await (await fetch('/api/test/embeddings')).json().catch(()=>null);
+  if(d && d.ok){ $('embTest').textContent = `✓ Working (dimension ${d.dim})`; $('embTest').className='testline ok'; }
+  else{ $('embTest').textContent = '✗ '+((d&&(d.error||d.detail))||'Connection failed — is an embedding model loaded?'); $('embTest').className='testline bad'; }
+};
+
+// ---------- watch folders UI ----------
+let watchFolders = [];
+function renderWatchList(){
+  const el = $('watchList');
+  el.innerHTML = watchFolders.length ? '' : '<div style="font-size:12px;color:var(--muted);padding:4px 0">No folders yet</div>';
+  watchFolders.forEach((f,i)=>{
+    const div = document.createElement('div'); div.className = 'wf';
+    div.innerHTML = `<span title="${esc(f)}">📁 ${esc(f)}</span><button title="Remove">✕</button>`;
+    div.querySelector('button').onclick = ()=>{ watchFolders.splice(i,1); renderWatchList(); };
+    el.appendChild(div);
+  });
+}
+$('scanNowBtn').onclick = async ()=>{
+  // save the current folder list first so the scan uses it
+  $('scanResult').textContent = 'Scanning…'; $('scanResult').className = 'testline';
+  try{
+    await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({watch:{folders:watchFolders.slice(), auto:$('s_watchAuto').checked, interval:(cfg.watch&&cfg.watch.interval)||60}})});
+    const d = await (await fetch('/api/watch/scan',{method:'POST'})).json();
+    $('scanResult').textContent = `✓ Scan done — ${d.added} new, ${d.updated} updated (indexing in background)`;
+    $('scanResult').className = 'testline ok';
+    refreshDocs();
+  }catch(e){ $('scanResult').textContent = '✗ '+(e.message||'scan failed'); $('scanResult').className='testline bad'; }
+};
+
+// ---------- folder browser ----------
+let browsePath = '';
+async function browseTo(path){
+  const r = await fetch('/api/browse?path='+encodeURIComponent(path||''));
+  if(!r.ok){ alert('Cannot open that folder'); return; }
+  const d = await r.json();
+  browsePath = d.path;
+  $('browsePath').textContent = d.path || 'Drives';
+  $('browseUp').disabled = (d.parent===null);
+  $('browseUp').onclick = ()=> browseTo(d.parent===null ? '' : d.parent);
+  $('browseSelect').disabled = !d.path;
+  const list = $('browseDirs'); list.innerHTML = '';
+  if(!d.dirs.length) list.innerHTML = '<div class="bdir" style="color:var(--muted);cursor:default">no sub-folders</div>';
+  for(const dir of d.dirs){
+    const div = document.createElement('div'); div.className = 'bdir';
+    const name = dir.replace(/[\\/]+$/,'').split(/[\\/]/).pop() || dir;
+    div.textContent = '📁 ' + name;
+    div.title = dir;
+    div.onclick = ()=>browseTo(dir);
+    list.appendChild(div);
+  }
+}
+$('addWatchBtn').onclick = ()=>{ $('browseBg').classList.add('open'); browseTo(''); };
+$('browseCancel').onclick = ()=> $('browseBg').classList.remove('open');
+$('browseBg').onclick = e=>{ if(e.target===$('browseBg')) $('browseBg').classList.remove('open'); };
+$('browseSelect').onclick = ()=>{
+  if(browsePath && !watchFolders.includes(browsePath)){ watchFolders.push(browsePath); renderWatchList(); }
+  $('browseBg').classList.remove('open');
+};
+
+$('updateDepsBtn').onclick = async ()=>{
+  const log = $('depLog'); log.style.display='block'; log.textContent='';
+  $('depStatus').textContent='Running… (this can take a few minutes)'; $('depStatus').className='testline';
+  $('updateDepsBtn').disabled = true;
+  try{
+    const resp = await fetch('/api/update-deps',{method:'POST'});
+    const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf='';
+    while(true){
+      const {done, value} = await reader.read(); if(done) break;
+      buf += dec.decode(value,{stream:true});
+      const lines = buf.split('\n\n'); buf = lines.pop();
+      for(const l of lines){
+        if(!l.startsWith('data:')) continue;
+        let ev; try{ ev = JSON.parse(l.slice(5)); }catch{ continue; }
+        if(ev.type==='line'){ log.textContent += ev.text+'\n'; log.scrollTop = log.scrollHeight; }
+        else if(ev.type==='done'){
+          $('depStatus').textContent = (ev.ok?'✓ ':'✗ ') + ev.text;
+          $('depStatus').className = 'testline ' + (ev.ok?'ok':'bad');
+        }
+      }
+    }
+  }catch(e){ $('depStatus').textContent = '✗ ' + e.message; $('depStatus').className='testline bad'; }
+  finally{ $('updateDepsBtn').disabled = false; }
+};
+
+// ---------- init ----------
+refreshDocs();
+refreshChats();
+checkStatus();
+setInterval(checkStatus, 30000);
+</script>
+</body>
+</html>
