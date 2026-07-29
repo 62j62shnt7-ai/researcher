@@ -187,8 +187,7 @@
   async function fetchRepoKB() {
     const targetUrl = state.cloudUrl || 'knowledge_base.json';
     try {
-      const driveMatch = targetUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
-      if (driveMatch) {
+      if (targetUrl.includes('drive.google.com') || targetUrl.match(/\/folders\//) || targetUrl.match(/\/file\/d\//)) {
         return;
       }
 
@@ -202,6 +201,64 @@
     } catch (e) {
       console.warn('Could not load knowledge base from:', targetUrl, e);
     }
+  }
+
+  // --- Fetch Direct PDF URL or Google Drive Share Link ---
+  async function fetchDirectPdfUrl(urlInput) {
+    if (!urlInput) return false;
+    const updateStatus = (msg, isErr = false) => {
+      if (elements.settingsStatus) {
+        elements.settingsStatus.className = isErr ? 'status-msg error' : 'status-msg';
+        elements.settingsStatus.textContent = msg;
+        elements.settingsStatus.classList.remove('hidden');
+      }
+    };
+
+    let downloadUrl = urlInput.trim();
+    let filename = 'Cloud_Document.pdf';
+
+    const driveMatch = urlInput.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || urlInput.match(/id=([a-zA-Z0-9_-]+)/);
+    if (driveMatch) {
+      const fileId = driveMatch[1];
+      downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
+      filename = `Google_Drive_Code_${fileId.substring(0, 6)}.pdf`;
+    } else {
+      const urlParts = downloadUrl.split('/');
+      const lastPart = urlParts[urlParts.length - 1].split('?')[0];
+      if (lastPart && lastPart.toLowerCase().endsWith('.pdf')) {
+        filename = lastPart;
+      }
+    }
+
+    updateStatus(`📥 Downloading & parsing ${filename}...`);
+
+    const fetchUrls = [
+      downloadUrl,
+      `https://corsproxy.io/?${encodeURIComponent(downloadUrl)}`,
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(downloadUrl)}`
+    ];
+
+    for (const pUrl of fetchUrls) {
+      try {
+        const res = await fetch(pUrl);
+        if (res.ok) {
+          const blob = await res.blob();
+          if (blob.size > 500) {
+            const fileObj = new File([blob], filename, { type: 'application/pdf' });
+            const docMeta = await processUploadedFile(fileObj);
+            updateLibraryUI();
+            populateDocScopeSelect();
+            updateStatus(`✅ Successfully imported ${docMeta.filename} (${docMeta.pageCount} pages, ${docMeta.chunkCount} chunks)!`);
+            return true;
+          }
+        }
+      } catch (e) {
+        console.warn('Direct fetch failed:', e);
+      }
+    }
+
+    updateStatus(`❌ Could not download PDF from URL. Please use the "Upload Code" button to pick the PDF directly from your device.`, true);
+    return false;
   }
 
   // --- Scan Google Drive Folder for File Checklist ---
@@ -218,7 +275,6 @@
     updateStatus('🔄 Scanning Google Drive link(s)...');
     const fileMap = new Map();
 
-    // Check for direct file share links: /file/d/FILE_ID
     const directFileMatches = Array.from(urlOrId.matchAll(/\/file\/d\/([a-zA-Z0-9_-]{25,50})/g));
     if (directFileMatches.length > 0) {
       directFileMatches.forEach((m, idx) => {
@@ -227,7 +283,6 @@
       });
     }
 
-    // Check for folder links: /folders/FOLDER_ID
     const folderMatches = Array.from(urlOrId.matchAll(/\/folders\/([a-zA-Z0-9_-]{25,50})/g));
     let folderIds = folderMatches.map(m => m[1]);
 
@@ -258,19 +313,10 @@
         } catch (e) {}
       }
 
-      // Pattern A: Match ["FILE_ID", "filename.pdf", ...] in Google Drive stream data
       const jsonMatches = Array.from(htmlText.matchAll(/\["([a-zA-Z0-9_-]{25,50})",\s*"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx|md))"/gi));
       jsonMatches.forEach(m => {
         if (m[1] && m[2] && !m[2].includes('<') && !m[2].includes('>')) {
           fileMap.set(m[1], m[2]);
-        }
-      });
-
-      // Pattern B: Match /file/d/FILE_ID inside folder page HTML
-      const linkMatches = Array.from(htmlText.matchAll(/\/file\/d\/([a-zA-Z0-9_-]{25,50})/g));
-      linkMatches.forEach((m) => {
-        if (m[1] && !fileMap.has(m[1])) {
-          fileMap.set(m[1], `Drive_PDF_${fileMap.size + 1}.pdf`);
         }
       });
     }
@@ -278,7 +324,11 @@
     const fileList = Array.from(fileMap.entries()).map(([id, name]) => ({ id, name }));
 
     if (fileList.length === 0) {
-      updateStatus('⚠️ No PDF/Word codes found in this Google Drive link. Please ensure the file/folder is set to "Anyone with link can view".', true);
+      if (urlOrId.includes('/file/d/') || urlOrId.endsWith('.pdf')) {
+        return await fetchDirectPdfUrl(urlOrId);
+      }
+
+      updateStatus('⚠️ Could not auto-detect files in folder link. Use "Upload Code" button or paste direct file share links.', true);
       if (elements.driveFilesContainer) elements.driveFilesContainer.classList.add('hidden');
       return [];
     }
@@ -327,6 +377,7 @@
       const item = selectedFiles[i];
       updateStatus(`📥 Parsing (${i + 1}/${selectedFiles.length}): ${item.name}...`);
       const downloadUrls = [
+        `https://drive.usercontent.google.com/download?id=${item.id}&export=download`,
         `https://corsproxy.io/?https://drive.google.com/uc?export=download&id=${item.id}`,
         `https://api.allorigins.win/raw?url=${encodeURIComponent('https://drive.google.com/uc?export=download&id=' + item.id)}`
       ];
@@ -758,7 +809,7 @@ If the context does not contain enough information, state what is known and clar
 
         if (!cloudUrl) {
           elements.settingsStatus.className = 'status-msg error';
-          elements.settingsStatus.textContent = 'Please enter a Google Drive folder link or cloud URL.';
+          elements.settingsStatus.textContent = 'Please enter a Google Drive link or PDF URL.';
           elements.settingsStatus.classList.remove('hidden');
           return;
         }
@@ -794,7 +845,7 @@ If the context does not contain enough information, state what is known and clar
         await fetchRepoKB();
         await discoverUserModels(state.apiKey);
         elements.settingsStatus.className = 'status-msg success';
-        elements.settingsStatus.textContent = 'Settings saved! Cloud database and models updated.';
+        elements.settingsStatus.textContent = 'Settings saved! Database updated.';
         elements.settingsStatus.classList.remove('hidden');
         setTimeout(() => {
           elements.settingsModal.classList.add('hidden');
@@ -1042,7 +1093,7 @@ If the context does not contain enough information, state what is known and clar
     if (state.apiKey) {
       discoverUserModels(state.apiKey);
     }
-    console.log('Researcher AI Web App initialized with Google Drive File Picker Checklist.');
+    console.log('Researcher AI Web App initialized with Direct PDF & Google Drive URL Loader.');
   }
 
   window.addEventListener('DOMContentLoaded', init);
