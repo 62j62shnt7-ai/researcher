@@ -260,32 +260,34 @@
 
     const fileMap = new Map();
 
-    // Pattern A: Match ["FILE_ID", "filename.pdf", ...]
-    const jsonMatches = Array.from(htmlText.matchAll(/\["([a-zA-Z0-9_-]{25,50})",\s*"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx))"/gi));
+    // Pattern A: Match ["FILE_ID", "filename.pdf", ...] in Google Drive stream data
+    const jsonMatches = Array.from(htmlText.matchAll(/\["([a-zA-Z0-9_-]{25,50})",\s*"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx|md))"/gi));
     jsonMatches.forEach(m => {
-      if (m[1] && m[2]) fileMap.set(m[1], m[2]);
-    });
-
-    // Pattern B: Match /file/d/FILE_ID
-    const fileLinkMatches = Array.from(htmlText.matchAll(/\/file\/d\/([a-zA-Z0-9_-]{25,50})/g));
-    fileLinkMatches.forEach((m) => {
-      if (m[1] && !fileMap.has(m[1])) {
-        fileMap.set(m[1], `Drive_PDF_${fileMap.size + 1}.pdf`);
+      if (m[1] && m[2] && !m[2].includes('<') && !m[2].includes('>')) {
+        fileMap.set(m[1], m[2]);
       }
     });
 
-    // Pattern C: Match id="entry-FILE_ID"
-    const entryMatches = Array.from(htmlText.matchAll(/id="entry-([a-zA-Z0-9_-]{25,50})"/g));
-    entryMatches.forEach((m) => {
-      if (m[1] && !fileMap.has(m[1])) {
-        fileMap.set(m[1], `Drive_Doc_${fileMap.size + 1}.pdf`);
+    // Pattern B: Match title attribute or filename property before/after /file/d/FILE_ID
+    const linkMatches = Array.from(htmlText.matchAll(/\/file\/d\/([a-zA-Z0-9_-]{25,50})[^\n<]*?title="([^"]+\.(?:pdf|docx|txt|csv|xlsx|md))"/gi));
+    linkMatches.forEach(m => {
+      if (m[1] && m[2]) {
+        fileMap.set(m[1], m[2]);
+      }
+    });
+
+    // Pattern C: Match filename followed by file ID or vice versa in JSON blobs
+    const fileBlobMatches = Array.from(htmlText.matchAll(/"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx|md))"[\s\S]{1,100}?"([a-zA-Z0-9_-]{25,50})"/gi));
+    fileBlobMatches.forEach(m => {
+      if (m[1] && m[2] && m[2].length >= 28) {
+        fileMap.set(m[2], m[1]);
       }
     });
 
     const fileList = Array.from(fileMap.entries()).map(([id, name]) => ({ id, name }));
 
     if (fileList.length === 0) {
-      updateStatus('⚠️ Could not parse files in Google Drive folder. Ensure folder is shared as "Anyone with link can view".', true);
+      updateStatus('⚠️ No PDF/Word codes found in this Google Drive folder. Ensure files are inside and shared as "Anyone with link can view".', true);
       return 0;
     }
 
