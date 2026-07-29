@@ -215,64 +215,77 @@
       }
     };
 
-    const folderMatch = urlOrId.match(/\/folders\/([a-zA-Z0-9_-]+)/) || [null, urlOrId];
-    const folderId = folderMatch[1] || urlOrId;
-
-    updateStatus('🔄 Scanning Google Drive public folder...');
-
-    let htmlText = '';
-    const proxyUrls = [
-      `https://corsproxy.io/?https://drive.google.com/drive/folders/${folderId}`,
-      `https://api.allorigins.win/raw?url=${encodeURIComponent('https://drive.google.com/drive/folders/' + folderId)}`,
-      `https://corsproxy.io/?https://drive.google.com/embeddedfolderview?id=${folderId}`
-    ];
-
-    for (const pUrl of proxyUrls) {
-      try {
-        const res = await fetch(pUrl);
-        if (res.ok) {
-          const txt = await res.text();
-          if (txt && txt.length > 500) {
-            htmlText += '\n' + txt;
-          }
-        }
-      } catch (e) {}
-    }
-
+    updateStatus('🔄 Scanning Google Drive link(s)...');
     const fileMap = new Map();
 
-    const jsonMatches = Array.from(htmlText.matchAll(/\["([a-zA-Z0-9_-]{25,50})",\s*"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx|md))"/gi));
-    jsonMatches.forEach(m => {
-      if (m[1] && m[2] && !m[2].includes('<') && !m[2].includes('>')) {
-        fileMap.set(m[1], m[2]);
-      }
-    });
+    // Check for direct file share links: /file/d/FILE_ID
+    const directFileMatches = Array.from(urlOrId.matchAll(/\/file\/d\/([a-zA-Z0-9_-]{25,50})/g));
+    if (directFileMatches.length > 0) {
+      directFileMatches.forEach((m, idx) => {
+        const fileId = m[1];
+        fileMap.set(fileId, `Google_Drive_Code_${idx + 1}.pdf`);
+      });
+    }
 
-    const linkMatches = Array.from(htmlText.matchAll(/\/file\/d\/([a-zA-Z0-9_-]{25,50})[^\n<]*?title="([^"]+\.(?:pdf|docx|txt|csv|xlsx|md))"/gi));
-    linkMatches.forEach(m => {
-      if (m[1] && m[2]) {
-        fileMap.set(m[1], m[2]);
-      }
-    });
+    // Check for folder links: /folders/FOLDER_ID
+    const folderMatches = Array.from(urlOrId.matchAll(/\/folders\/([a-zA-Z0-9_-]{25,50})/g));
+    let folderIds = folderMatches.map(m => m[1]);
 
-    const fileBlobMatches = Array.from(htmlText.matchAll(/"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx|md))"[\s\S]{1,100}?"([a-zA-Z0-9_-]{25,50})"/gi));
-    fileBlobMatches.forEach(m => {
-      if (m[1] && m[2] && m[2].length >= 28) {
-        fileMap.set(m[2], m[1]);
+    if (folderIds.length === 0 && fileMap.size === 0) {
+      const rawIdMatch = urlOrId.trim().match(/^[a-zA-Z0-9_-]{25,50}$/);
+      if (rawIdMatch) {
+        folderIds = [rawIdMatch[0]];
       }
-    });
+    }
+
+    for (const folderId of folderIds) {
+      let htmlText = '';
+      const proxyUrls = [
+        `https://corsproxy.io/?https://drive.google.com/drive/folders/${folderId}`,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent('https://drive.google.com/drive/folders/' + folderId)}`,
+        `https://corsproxy.io/?https://drive.google.com/embeddedfolderview?id=${folderId}`
+      ];
+
+      for (const pUrl of proxyUrls) {
+        try {
+          const res = await fetch(pUrl);
+          if (res.ok) {
+            const txt = await res.text();
+            if (txt && txt.length > 300) {
+              htmlText += '\n' + txt;
+            }
+          }
+        } catch (e) {}
+      }
+
+      // Pattern A: Match ["FILE_ID", "filename.pdf", ...] in Google Drive stream data
+      const jsonMatches = Array.from(htmlText.matchAll(/\["([a-zA-Z0-9_-]{25,50})",\s*"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx|md))"/gi));
+      jsonMatches.forEach(m => {
+        if (m[1] && m[2] && !m[2].includes('<') && !m[2].includes('>')) {
+          fileMap.set(m[1], m[2]);
+        }
+      });
+
+      // Pattern B: Match /file/d/FILE_ID inside folder page HTML
+      const linkMatches = Array.from(htmlText.matchAll(/\/file\/d\/([a-zA-Z0-9_-]{25,50})/g));
+      linkMatches.forEach((m) => {
+        if (m[1] && !fileMap.has(m[1])) {
+          fileMap.set(m[1], `Drive_PDF_${fileMap.size + 1}.pdf`);
+        }
+      });
+    }
 
     const fileList = Array.from(fileMap.entries()).map(([id, name]) => ({ id, name }));
 
     if (fileList.length === 0) {
-      updateStatus('⚠️ No PDF/Word codes found in this Google Drive folder. Ensure folder is shared as "Anyone with link can view".', true);
+      updateStatus('⚠️ No PDF/Word codes found in this Google Drive link. Please ensure the file/folder is set to "Anyone with link can view".', true);
       if (elements.driveFilesContainer) elements.driveFilesContainer.classList.add('hidden');
       return [];
     }
 
     state.fetchedDriveFiles = fileList;
     renderDriveChecklist(fileList);
-    updateStatus(`✅ Found ${fileList.length} code(s). Select the files you want to import below.`);
+    updateStatus(`✅ Found ${fileList.length} code document(s). Select the files you want to import below.`);
     return fileList;
   }
 
