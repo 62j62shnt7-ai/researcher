@@ -993,13 +993,13 @@ If the context does not contain enough information, state what is known and clar
 
   async function init() {
     initElements();
-    await initIndexedDB();
-    await fetchRepoKB();
-    if (state.apiKey) {
-      await discoverUserModels(state.apiKey);
-    }
     setupEventListeners();
-    console.log('Researcher AI Web App initialized with Cloud Fetch button & Drive parser.');
+    initIndexedDB();
+    fetchRepoKB();
+    if (state.apiKey) {
+      discoverUserModels(state.apiKey);
+    }
+    console.log('Researcher AI Web App initialized instantly.');
   }
 
   window.addEventListener('DOMContentLoaded', init);
