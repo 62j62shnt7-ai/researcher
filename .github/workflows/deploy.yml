@@ -33,11 +33,21 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          cache: 'pip'
+
+      - name: Cache FastEmbed & HuggingFace Models
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/fastembed
+            ~/.cache/huggingface
+          key: fastembed-models-${{ runner.os }}-bge-small-en-v1.5
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pypdf pdfplumber python-docx openpyxl fastembed
+
 
       - name: Build Knowledge Base Index (Free FastEmbed + Gemini)
 
