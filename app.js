@@ -574,15 +574,13 @@
       throw new Error('Please set your Gemini API key in Settings first.');
     }
 
-    const selectedModel = (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value) || state.model;
-    const fallbackList = (state.discoveredModels && state.discoveredModels.length > 0) ? state.discoveredModels : [];
-    const modelsToTry = [selectedModel, ...fallbackList].filter((m, i, arr) => m && arr.indexOf(m) === i);
-
-    if (modelsToTry.length === 0) {
-      throw new Error('No models discovered for your Gemini API Key. Please open Settings and click Save / Test Connection.');
+    const selectedModel = state.model || (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value);
+    if (!selectedModel) {
+      throw new Error('No Gemini model selected. Please open Settings to test connection and fetch models.');
     }
 
-
+    const fallbackList = (state.discoveredModels && state.discoveredModels.length > 0) ? state.discoveredModels : [];
+    const modelsToTry = [selectedModel, ...fallbackList].filter((m, i, arr) => m && arr.indexOf(m) === i);
 
     let lastError = null;
 
@@ -625,19 +623,24 @@ If the context does not contain enough information, state what is known and clar
           body: JSON.stringify(body)
         });
 
-
         if (res.ok) {
           const data = await res.json();
           const candidate = data.candidates?.[0];
-          const answerText = candidate?.content?.parts?.map(p => p.text).join('') || 'No response generated.';
+          let answerText = candidate?.content?.parts?.map(p => p.text).join('') || 'No response generated.';
+          if (modelName !== selectedModel) {
+            answerText += `\n\n*(Note: Requested model \`${selectedModel}\` returned an error: ${lastError ? lastError.message : 'Unavailable'}. Response generated via fallback \`${modelName}\`)*`;
+          }
           return { answer: answerText, modelUsed: modelName };
         } else {
           const errJson = await res.json().catch(() => ({}));
           lastError = new Error(errJson.error?.message || `HTTP ${res.status}`);
+          console.warn(`Model ${modelName} call failed:`, lastError);
         }
       } catch (e) {
         lastError = e;
       }
+    }
+
     }
 
     throw lastError || new Error('Failed to communicate with Gemini API.');
