@@ -9,8 +9,10 @@
   // Global State
   const state = {
     apiKey: localStorage.getItem('gemini_api_key') || '',
-    model: localStorage.getItem('gemini_model') || 'gemini-1.5-flash',
+    model: localStorage.getItem('gemini_model') || 'gemini-2.0-flash',
+    discoveredModels: [],
     cloudUrl: localStorage.getItem('cloud_storage_url') || '',
+
     repoKB: { documents: [], chunks: [] },
     localDocs: [],
     localChunks: [],
@@ -100,7 +102,15 @@
         }
       }
 
-      const generateModels = models.filter(m => m.supportedGenerationMethods?.includes('generateContent'));
+      const generateModelNames = generateModels.map(m => m.name.replace('models/', ''));
+      state.discoveredModels = generateModelNames;
+
+      // If current saved model is not in discovered models or deprecated, default to first active model
+      if (generateModelNames.length > 0 && !generateModelNames.includes(state.model)) {
+        state.model = generateModelNames.includes('gemini-2.0-flash') ? 'gemini-2.0-flash' : generateModelNames[0];
+        localStorage.setItem('gemini_model', state.model);
+      }
+
       const selectElements = [
         elements.chatModelSelect,
         elements.modelSelect,
@@ -109,7 +119,6 @@
       ].filter((el, idx, self) => el && self.indexOf(el) === idx);
 
       if (generateModels.length > 0 && selectElements.length > 0) {
-        const currentVal = state.model || (elements.chatModelSelect ? elements.chatModelSelect.value : '');
         selectElements.forEach(selectEl => {
           selectEl.innerHTML = '';
           generateModels.forEach(m => {
@@ -117,14 +126,15 @@
             const opt = document.createElement('option');
             opt.value = modelId;
             opt.textContent = `${m.displayName || modelId}`;
-            if (modelId === currentVal || modelId === state.model || (modelId === 'gemini-2.0-flash' && !currentVal)) {
+            if (modelId === state.model) {
               opt.selected = true;
             }
             selectEl.appendChild(opt);
           });
         });
       }
-      return generateModels.map(m => m.name.replace('models/', ''));
+      return generateModelNames;
+
 
     } catch (e) {
       console.warn('Could not auto-discover models:', e);
@@ -562,7 +572,9 @@
     }
 
     const selectedModel = (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value) || state.model || 'gemini-2.0-flash';
-    const modelsToTry = [selectedModel, 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-flash'].filter((m, i, arr) => m && arr.indexOf(m) === i);
+    const fallbackList = (state.discoveredModels && state.discoveredModels.length > 0) ? state.discoveredModels : ['gemini-2.0-flash', 'gemini-2.5-flash'];
+    const modelsToTry = [selectedModel, ...fallbackList].filter((m, i, arr) => m && arr.indexOf(m) === i);
+
 
     let lastError = null;
 
