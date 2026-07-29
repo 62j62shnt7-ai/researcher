@@ -17,38 +17,40 @@
     db: null
   };
 
-  // DOM Elements
-  const elements = {
-    apiKeyInput: document.getElementById('api-key-input'),
-    btnSaveKey: document.getElementById('btn-save-key'),
-    btnTestKey: document.getElementById('btn-test-key'),
-    btnSettings: document.getElementById('btn-settings'),
-    settingsModal: document.getElementById('settings-modal'),
-    settingsStatus: document.getElementById('settings-status'),
-    btnUpload: document.getElementById('btn-upload'),
-    fileInput: document.getElementById('file-input'),
-    btnLibrary: document.getElementById('btn-library'),
-    libraryModal: document.getElementById('library-modal'),
-    libCount: document.getElementById('lib-count'),
-    repoDocsList: document.getElementById('repo-docs-list'),
-    localDocsList: document.getElementById('local-docs-list'),
-    btnExportDb: document.getElementById('btn-export-db'),
-    btnImportDb: document.getElementById('btn-import-db'),
-    importDbInput: document.getElementById('import-db-input'),
-    searchInput: document.getElementById('search-input'),
-    searchClearBtn: document.getElementById('search-clear-btn'),
-    searchResultsSection: document.getElementById('search-results-section'),
-    resultsList: document.getElementById('results-list'),
-    resultsCount: document.getElementById('results-count'),
-    closeResultsBtn: document.getElementById('close-results-btn'),
-    chatMessages: document.getElementById('chat-messages'),
-    chatForm: document.getElementById('chat-form'),
-    chatInput: document.getElementById('chat-input'),
-    btnSend: document.getElementById('btn-send'),
-    useRagToggle: document.getElementById('use-rag-toggle'),
-    modelSelect: document.getElementById('model-select'),
-    filterPills: document.querySelectorAll('.pill')
-  };
+  // DOM Elements holder
+  const elements = {};
+
+  function initElements() {
+    elements.apiKeyInput = document.getElementById('api-key-input');
+    elements.btnSaveKey = document.getElementById('btn-save-key');
+    elements.btnTestKey = document.getElementById('btn-test-key');
+    elements.btnSettings = document.getElementById('btn-settings');
+    elements.settingsModal = document.getElementById('settings-modal');
+    elements.settingsStatus = document.getElementById('settings-status');
+    elements.btnUpload = document.getElementById('btn-upload');
+    elements.fileInput = document.getElementById('file-input');
+    elements.btnLibrary = document.getElementById('btn-library');
+    elements.libraryModal = document.getElementById('library-modal');
+    elements.libCount = document.getElementById('lib-count');
+    elements.repoDocsList = document.getElementById('repo-docs-list');
+    elements.localDocsList = document.getElementById('local-docs-list');
+    elements.btnExportDb = document.getElementById('btn-export-db');
+    elements.btnImportDb = document.getElementById('btn-import-db');
+    elements.importDbInput = document.getElementById('import-db-input');
+    elements.searchInput = document.getElementById('search-input');
+    elements.searchClearBtn = document.getElementById('search-clear-btn');
+    elements.searchResultsSection = document.getElementById('search-results-section');
+    elements.resultsList = document.getElementById('results-list');
+    elements.resultsCount = document.getElementById('results-count');
+    elements.closeResultsBtn = document.getElementById('close-results-btn');
+    elements.chatMessages = document.getElementById('chat-messages');
+    elements.chatForm = document.getElementById('chat-form');
+    elements.chatInput = document.getElementById('chat-input');
+    elements.btnSend = document.getElementById('btn-send');
+    elements.useRagToggle = document.getElementById('use-rag-toggle');
+    elements.modelSelect = document.getElementById('model-select');
+    elements.filterPills = document.querySelectorAll('.pill');
+  }
 
   // Initialize PDF.js worker
   if (window.pdfjsLib) {
@@ -447,41 +449,45 @@ If the context does not contain enough information, state what is known and clar
   function updateLibraryUI() {
     const repoDocs = state.repoKB.documents || [];
     const totalCount = repoDocs.length + state.localDocs.length;
-    elements.libCount.textContent = totalCount;
+    if (elements.libCount) elements.libCount.textContent = totalCount;
 
-    if (repoDocs.length === 0) {
-      elements.repoDocsList.innerHTML = '<p class="doc-meta">No pre-indexed standards in repo yet.</p>';
-    } else {
-      elements.repoDocsList.innerHTML = repoDocs.map(d => `
-        <div class="doc-item">
-          <div>
-            <div class="doc-name">📄 ${d.filename}</div>
-            <div class="doc-meta">${d.chunk_count} chunks • ${d.page_count} pages</div>
+    if (elements.repoDocsList) {
+      if (repoDocs.length === 0) {
+        elements.repoDocsList.innerHTML = '<p class="doc-meta">No pre-indexed standards in repo yet.</p>';
+      } else {
+        elements.repoDocsList.innerHTML = repoDocs.map(d => `
+          <div class="doc-item">
+            <div>
+              <div class="doc-name">📄 ${d.filename}</div>
+              <div class="doc-meta">${d.chunk_count} chunks • ${d.page_count} pages</div>
+            </div>
+            <span class="pill">GitHub</span>
           </div>
-          <span class="pill">GitHub</span>
-        </div>
-      `).join('');
+        `).join('');
+      }
     }
 
-    if (state.localDocs.length === 0) {
-      elements.localDocsList.innerHTML = '<p class="doc-meta">No local documents uploaded yet.</p>';
-    } else {
-      elements.localDocsList.innerHTML = state.localDocs.map(d => `
-        <div class="doc-item">
-          <div>
-            <div class="doc-name">📱 ${d.filename}</div>
-            <div class="doc-meta">${d.chunkCount} chunks • ${d.pageCount} pages</div>
+    if (elements.localDocsList) {
+      if (state.localDocs.length === 0) {
+        elements.localDocsList.innerHTML = '<p class="doc-meta">No local documents uploaded yet.</p>';
+      } else {
+        elements.localDocsList.innerHTML = state.localDocs.map(d => `
+          <div class="doc-item">
+            <div>
+              <div class="doc-name">📱 ${d.filename}</div>
+              <div class="doc-meta">${d.chunkCount} chunks • ${d.pageCount} pages</div>
+            </div>
+            <button class="btn-text-only btn-del-doc" data-id="${d.id}">🗑️</button>
           </div>
-          <button class="btn-text-only btn-del-doc" data-id="${d.id}">🗑️</button>
-        </div>
-      `).join('');
+        `).join('');
 
-      document.querySelectorAll('.btn-del-doc').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-          const docId = e.currentTarget.getAttribute('data-id');
-          deleteLocalDocument(docId);
+        document.querySelectorAll('.btn-del-doc').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            const docId = e.currentTarget.getAttribute('data-id');
+            deleteLocalDocument(docId);
+          });
         });
-      });
+      }
     }
   }
 
@@ -521,244 +527,281 @@ If the context does not contain enough information, state what is known and clar
 
     msgDiv.appendChild(avatar);
     msgDiv.appendChild(body);
-    elements.chatMessages.appendChild(msgDiv);
-    elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+    if (elements.chatMessages) {
+      elements.chatMessages.appendChild(msgDiv);
+      elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+    }
   }
 
   // --- Event Listeners ---
   function setupEventListeners() {
-    elements.btnSettings.addEventListener('click', () => {
-      elements.apiKeyInput.value = state.apiKey;
-      elements.settingsModal.classList.remove('hidden');
-    });
-
-    elements.settingsModal.querySelector('.modal-close').addEventListener('click', () => {
-      elements.settingsModal.classList.add('hidden');
-    });
-
-    elements.btnSaveKey.addEventListener('click', async () => {
-      state.apiKey = elements.apiKeyInput.value.trim();
-      localStorage.setItem('gemini_api_key', state.apiKey);
-      await discoverUserModels(state.apiKey);
-      elements.settingsStatus.className = 'status-msg success';
-      elements.settingsStatus.textContent = 'API Key saved! Discovered available models.';
-      elements.settingsStatus.classList.remove('hidden');
-      setTimeout(() => {
-        elements.settingsModal.classList.add('hidden');
-        elements.settingsStatus.classList.add('hidden');
-      }, 1200);
-    });
-
-    elements.btnTestKey.addEventListener('click', async () => {
-      const testKey = elements.apiKeyInput.value.trim();
-      if (!testKey) {
-        elements.settingsStatus.className = 'status-msg error';
-        elements.settingsStatus.textContent = 'Please enter an API Key to test.';
-        elements.settingsStatus.classList.remove('hidden');
-        return;
-      }
-      elements.settingsStatus.className = 'status-msg';
-      elements.settingsStatus.textContent = 'Discovering models for your account...';
-      elements.settingsStatus.classList.remove('hidden');
-
-      await discoverUserModels(testKey);
-
-      let chatStatus = false;
-      let embedStatus = false;
-
-      const chatModels = [elements.modelSelect?.value, 'gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-pro'].filter(Boolean);
-      let workingChatModel = '';
-
-      for (const cm of chatModels) {
-        try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${cm}:generateContent?key=${testKey}`;
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Ping' }] }] })
-          });
-          if (res.ok) {
-            chatStatus = true;
-            workingChatModel = cm;
-            break;
-          }
-        } catch (e) {}
-      }
-
-      const embedModels = ['text-embedding-004', 'embedding-001'];
-      let workingEmbedModel = '';
-
-      for (const em of embedModels) {
-        try {
-          const url = `https://generativelanguage.googleapis.com/v1beta/models/${em}:embedContent?key=${testKey}`;
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ content: { parts: [{ text: 'Ping' }] } })
-          });
-          if (res.ok) {
-            embedStatus = true;
-            workingEmbedModel = em;
-            break;
-          }
-        } catch (e) {}
-      }
-
-      if (chatStatus) {
-        elements.settingsStatus.className = 'status-msg success';
-        elements.settingsStatus.textContent = `✔️ Chat Ready (${workingChatModel}) | ${embedStatus ? `✔️ Embedder Ready (${workingEmbedModel})` : '⚠️ Keyword-Only Retrieval'}`;
-      } else {
-        elements.settingsStatus.className = 'status-msg error';
-        elements.settingsStatus.textContent = '❌ Invalid API Key or network blocked. Please check your key at aistudio.google.com.';
-      }
-    });
-
-    elements.btnLibrary.addEventListener('click', () => {
-      updateLibraryUI();
-      elements.libraryModal.classList.remove('hidden');
-    });
-
-    elements.libraryModal.querySelector('.modal-close').addEventListener('click', () => {
-      elements.libraryModal.classList.add('hidden');
-    });
-
-    elements.btnUpload.addEventListener('click', () => {
-      elements.fileInput.click();
-    });
-
-    elements.fileInput.addEventListener('change', async (e) => {
-      const files = Array.from(e.target.files);
-      if (!files.length) return;
-
-      renderMessage('assistant', `Uploading and processing ${files.length} document(s)...`);
-      for (const file of files) {
-        try {
-          const docMeta = await processUploadedFile(file);
-          renderMessage('assistant', `✅ Successfully indexed **${docMeta.filename}** (${docMeta.chunkCount} chunks, ${docMeta.pageCount} pages).`);
-        } catch (err) {
-          renderMessage('assistant', `❌ Error indexing ${file.name}: ${err.message}`);
-        }
-      }
-      updateLibraryUI();
-      elements.fileInput.value = '';
-    });
-
-    elements.filterPills.forEach((pill) => {
-      pill.addEventListener('click', (e) => {
-        elements.filterPills.forEach((p) => p.classList.remove('active'));
-        e.currentTarget.classList.add('active');
-        state.activeFilter = e.currentTarget.getAttribute('data-filter');
+    if (elements.btnSettings) {
+      elements.btnSettings.addEventListener('click', () => {
+        elements.apiKeyInput.value = state.apiKey;
+        elements.settingsModal.classList.remove('hidden');
       });
-    });
+    }
 
-    let searchTimeout;
-    elements.searchInput.addEventListener('input', (e) => {
-      const val = e.target.value.trim();
-      if (val) {
-        elements.searchClearBtn.classList.remove('hidden');
-      } else {
+    if (elements.settingsModal) {
+      const closeBtn = elements.settingsModal.querySelector('.modal-close');
+      if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+          elements.settingsModal.classList.add('hidden');
+        });
+      }
+    }
+
+    if (elements.btnSaveKey) {
+      elements.btnSaveKey.addEventListener('click', async () => {
+        state.apiKey = elements.apiKeyInput.value.trim();
+        localStorage.setItem('gemini_api_key', state.apiKey);
+        await discoverUserModels(state.apiKey);
+        elements.settingsStatus.className = 'status-msg success';
+        elements.settingsStatus.textContent = 'API Key saved! Discovered available models.';
+        elements.settingsStatus.classList.remove('hidden');
+        setTimeout(() => {
+          elements.settingsModal.classList.add('hidden');
+          elements.settingsStatus.classList.add('hidden');
+        }, 1200);
+      });
+    }
+
+    if (elements.btnTestKey) {
+      elements.btnTestKey.addEventListener('click', async () => {
+        const testKey = elements.apiKeyInput.value.trim();
+        if (!testKey) {
+          elements.settingsStatus.className = 'status-msg error';
+          elements.settingsStatus.textContent = 'Please enter an API Key to test.';
+          elements.settingsStatus.classList.remove('hidden');
+          return;
+        }
+        elements.settingsStatus.className = 'status-msg';
+        elements.settingsStatus.textContent = 'Discovering models for your account...';
+        elements.settingsStatus.classList.remove('hidden');
+
+        await discoverUserModels(testKey);
+
+        let chatStatus = false;
+        let embedStatus = false;
+
+        const chatModels = [elements.modelSelect?.value, 'gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-2.0-flash', 'gemini-1.5-pro'].filter(Boolean);
+        let workingChatModel = '';
+
+        for (const cm of chatModels) {
+          try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${cm}:generateContent?key=${testKey}`;
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Ping' }] }] })
+            });
+            if (res.ok) {
+              chatStatus = true;
+              workingChatModel = cm;
+              break;
+            }
+          } catch (e) {}
+        }
+
+        const embedModels = ['text-embedding-004', 'embedding-001'];
+        let workingEmbedModel = '';
+
+        for (const em of embedModels) {
+          try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${em}:embedContent?key=${testKey}`;
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ content: { parts: [{ text: 'Ping' }] } })
+            });
+            if (res.ok) {
+              embedStatus = true;
+              workingEmbedModel = em;
+              break;
+            }
+          } catch (e) {}
+        }
+
+        if (chatStatus) {
+          elements.settingsStatus.className = 'status-msg success';
+          elements.settingsStatus.textContent = `✔️ Chat Ready (${workingChatModel}) | ${embedStatus ? `✔️ Embedder Ready (${workingEmbedModel})` : '⚠️ Keyword-Only Retrieval'}`;
+        } else {
+          elements.settingsStatus.className = 'status-msg error';
+          elements.settingsStatus.textContent = '❌ Invalid API Key or network blocked. Please check your key at aistudio.google.com.';
+        }
+      });
+    }
+
+    if (elements.btnLibrary) {
+      elements.btnLibrary.addEventListener('click', () => {
+        updateLibraryUI();
+        elements.libraryModal.classList.remove('hidden');
+      });
+    }
+
+    if (elements.libraryModal) {
+      const closeBtn = elements.libraryModal.querySelector('.modal-close');
+      if (closeBtn) {
+        closeBtn.addEventListener('click', () => {
+          elements.libraryModal.classList.add('hidden');
+        });
+      }
+    }
+
+    if (elements.btnUpload && elements.fileInput) {
+      elements.btnUpload.addEventListener('click', () => {
+        elements.fileInput.click();
+      });
+
+      elements.fileInput.addEventListener('change', async (e) => {
+        const files = Array.from(e.target.files);
+        if (!files.length) return;
+
+        renderMessage('assistant', `Uploading and processing ${files.length} document(s)...`);
+        for (const file of files) {
+          try {
+            const docMeta = await processUploadedFile(file);
+            renderMessage('assistant', `✅ Successfully indexed **${docMeta.filename}** (${docMeta.chunkCount} chunks, ${docMeta.pageCount} pages).`);
+          } catch (err) {
+            renderMessage('assistant', `❌ Error indexing ${file.name}: ${err.message}`);
+          }
+        }
+        updateLibraryUI();
+        elements.fileInput.value = '';
+      });
+    }
+
+    if (elements.filterPills) {
+      elements.filterPills.forEach((pill) => {
+        pill.addEventListener('click', (e) => {
+          elements.filterPills.forEach((p) => p.classList.remove('active'));
+          e.currentTarget.classList.add('active');
+          state.activeFilter = e.currentTarget.getAttribute('data-filter');
+        });
+      });
+    }
+
+    if (elements.searchInput) {
+      let searchTimeout;
+      elements.searchInput.addEventListener('input', (e) => {
+        const val = e.target.value.trim();
+        if (val) {
+          elements.searchClearBtn.classList.remove('hidden');
+        } else {
+          elements.searchClearBtn.classList.add('hidden');
+          elements.searchResultsSection.classList.add('hidden');
+          return;
+        }
+
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(async () => {
+          const results = await performHybridSearch(val, 6);
+          elements.resultsCount.textContent = results.length;
+          if (results.length === 0) {
+            elements.resultsList.innerHTML = '<p class="result-text">No matching code clauses found.</p>';
+          } else {
+            elements.resultsList.innerHTML = results.map(r => `
+              <div class="result-card">
+                <div class="result-meta">${r.file} — ${r.clause} (Page ${r.page})</div>
+                <div class="result-text">${r.text}</div>
+              </div>
+            `).join('');
+          }
+          elements.searchResultsSection.classList.remove('hidden');
+        }, 300);
+      });
+    }
+
+    if (elements.searchClearBtn) {
+      elements.searchClearBtn.addEventListener('click', () => {
+        elements.searchInput.value = '';
         elements.searchClearBtn.classList.add('hidden');
         elements.searchResultsSection.classList.add('hidden');
-        return;
-      }
+      });
+    }
 
-      clearTimeout(searchTimeout);
-      searchTimeout = setTimeout(async () => {
-        const results = await performHybridSearch(val, 6);
-        elements.resultsCount.textContent = results.length;
-        if (results.length === 0) {
-          elements.resultsList.innerHTML = '<p class="result-text">No matching code clauses found.</p>';
-        } else {
-          elements.resultsList.innerHTML = results.map(r => `
-            <div class="result-card">
-              <div class="result-meta">${r.file} — ${r.clause} (Page ${r.page})</div>
-              <div class="result-text">${r.text}</div>
-            </div>
-          `).join('');
+    if (elements.closeResultsBtn) {
+      elements.closeResultsBtn.addEventListener('click', () => {
+        elements.searchResultsSection.classList.add('hidden');
+      });
+    }
+
+    if (elements.chatForm) {
+      elements.chatForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const prompt = elements.chatInput.value.trim();
+        if (!prompt) return;
+
+        elements.chatInput.value = '';
+        renderMessage('user', prompt);
+
+        const useRag = elements.useRagToggle.checked;
+        let retrieved = [];
+
+        if (useRag) {
+          retrieved = await performHybridSearch(prompt, 5);
         }
-        elements.searchResultsSection.classList.remove('hidden');
-      }, 300);
-    });
 
-    elements.searchClearBtn.addEventListener('click', () => {
-      elements.searchInput.value = '';
-      elements.searchClearBtn.classList.add('hidden');
-      elements.searchResultsSection.classList.add('hidden');
-    });
+        try {
+          const answer = await callGeminiChat(prompt, retrieved);
+          renderMessage('assistant', answer, retrieved);
+        } catch (err) {
+          renderMessage('assistant', `⚠️ **Error**: ${err.message}`);
+        }
+      });
+    }
 
-    elements.closeResultsBtn.addEventListener('click', () => {
-      elements.searchResultsSection.classList.add('hidden');
-    });
+    if (elements.btnExportDb) {
+      elements.btnExportDb.addEventListener('click', () => {
+        const backupData = {
+          documents: state.localDocs,
+          chunks: state.localChunks,
+          exportedAt: new Date().toISOString()
+        };
+        const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `researcher_backup_${Date.now()}.json`;
+        a.click();
+      });
+    }
 
-    elements.chatForm.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const prompt = elements.chatInput.value.trim();
-      if (!prompt) return;
+    if (elements.btnImportDb && elements.importDbInput) {
+      elements.btnImportDb.addEventListener('click', () => {
+        elements.importDbInput.click();
+      });
 
-      elements.chatInput.value = '';
-      renderMessage('user', prompt);
-
-      const useRag = elements.useRagToggle.checked;
-      let retrieved = [];
-
-      if (useRag) {
-        retrieved = await performHybridSearch(prompt, 5);
-      }
-
-      try {
-        const answer = await callGeminiChat(prompt, retrieved);
-        renderMessage('assistant', answer, retrieved);
-      } catch (err) {
-        renderMessage('assistant', `⚠️ **Error**: ${err.message}`);
-      }
-    });
-
-    elements.btnExportDb.addEventListener('click', () => {
-      const backupData = {
-        documents: state.localDocs,
-        chunks: state.localChunks,
-        exportedAt: new Date().toISOString()
-      };
-      const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `researcher_backup_${Date.now()}.json`;
-      a.click();
-    });
-
-    elements.btnImportDb.addEventListener('click', () => {
-      elements.importDbInput.click();
-    });
-
-    elements.importDbInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      try {
-        const text = await file.text();
-        const data = JSON.parse(text);
-        if (data.documents && data.chunks) {
-          for (const doc) {
-            const docChunks = data.chunks.filter((c) => c.docId === doc.id || c.file === doc.filename);
-            await saveLocalDocument(doc, docChunks);
+      elements.importDbInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        try {
+          const text = await file.text();
+          const data = JSON.parse(text);
+          if (data.documents && data.chunks) {
+            for (const doc of data.documents) {
+              const docChunks = data.chunks.filter((c) => c.docId === doc.id || c.file === doc.filename);
+              await saveLocalDocument(doc, docChunks);
+            }
+            alert('Backup restored successfully!');
+            updateLibraryUI();
           }
-          alert('Backup restored successfully!');
-          updateLibraryUI();
+        } catch (err) {
+          alert('Invalid backup file: ' + err.message);
         }
-      } catch (err) {
-        alert('Invalid backup file: ' + err.message);
-      }
-    });
+      });
+    }
   }
 
   async function init() {
+    initElements();
     await initIndexedDB();
     await fetchRepoKB();
     if (state.apiKey) {
       await discoverUserModels(state.apiKey);
     }
     setupEventListeners();
-    console.log('Researcher AI Web App initialized.');
+    console.log('Researcher AI Web App initialized successfully.');
   }
 
   window.addEventListener('DOMContentLoaded', init);
