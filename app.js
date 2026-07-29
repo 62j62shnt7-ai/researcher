@@ -15,7 +15,8 @@
     localDocs: [],
     localChunks: [],
     activeFilter: 'all',
-    db: null
+    db: null,
+    fetchedDriveFiles: []
   };
 
   // DOM Elements holder
@@ -25,6 +26,11 @@
     elements.apiKeyInput = document.getElementById('api-key-input');
     elements.cloudUrlInput = document.getElementById('cloud-url-input');
     elements.btnFetchCloud = document.getElementById('btn-fetch-cloud');
+    elements.driveFilesContainer = document.getElementById('drive-files-container');
+    elements.driveFilesList = document.getElementById('drive-files-list');
+    elements.btnSelectAllDrive = document.getElementById('btn-select-all-drive');
+    elements.btnDeselectAllDrive = document.getElementById('btn-deselect-all-drive');
+    elements.btnImportSelectedDrive = document.getElementById('btn-import-selected-drive');
     elements.btnSaveKey = document.getElementById('btn-save-key');
     elements.btnTestKey = document.getElementById('btn-test-key');
     elements.btnSettings = document.getElementById('btn-settings');
@@ -177,14 +183,12 @@
     });
   }
 
-  // --- Fetch Pre-indexed Knowledge Base (Cloud, Google Drive, or Repo) ---
+  // --- Fetch Pre-indexed Knowledge Base (Cloud or Repo) ---
   async function fetchRepoKB() {
     const targetUrl = state.cloudUrl || 'knowledge_base.json';
     try {
       const driveMatch = targetUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
       if (driveMatch) {
-        const folderId = driveMatch[1];
-        await loadGoogleDriveFolder(folderId);
         return;
       }
 
@@ -200,44 +204,21 @@
     }
   }
 
-  async function loadGoogleDriveFolder(urlOrId, statusCallback) {
-    if (!urlOrId) return 0;
+  // --- Scan Google Drive Folder for File Checklist ---
+  async function scanGoogleDriveFolder(urlOrId) {
+    if (!urlOrId) return [];
     const updateStatus = (msg, isErr = false) => {
-      if (statusCallback) statusCallback(msg, isErr);
-      else if (elements.settingsStatus) {
+      if (elements.settingsStatus) {
         elements.settingsStatus.className = isErr ? 'status-msg error' : 'status-msg';
         elements.settingsStatus.textContent = msg;
         elements.settingsStatus.classList.remove('hidden');
       }
     };
 
-    // Case 1: Direct File Link (e.g. https://drive.google.com/file/d/FILE_ID/view)
-    const fileMatch = urlOrId.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
-    if (fileMatch) {
-      const fileId = fileMatch[1];
-      updateStatus(`📥 Downloading Google Drive PDF file...`);
-      const directUrl = `https://corsproxy.io/?https://drive.google.com/uc?export=download&id=${fileId}`;
-      try {
-        const res = await fetch(directUrl);
-        if (res.ok) {
-          const blob = await res.blob();
-          const fileObj = new File([blob], `Drive_Doc_${fileId.substring(0, 6)}.pdf`, { type: 'application/pdf' });
-          const docMeta = await processUploadedFile(fileObj);
-          updateLibraryUI();
-          populateDocScopeSelect();
-          updateStatus(`✅ Successfully imported ${docMeta.filename}!`);
-          return 1;
-        }
-      } catch (e) {
-        console.warn('Direct file download failed:', e);
-      }
-    }
-
-    // Case 2: Folder Link (e.g. https://drive.google.com/drive/folders/FOLDER_ID)
     const folderMatch = urlOrId.match(/\/folders\/([a-zA-Z0-9_-]+)/) || [null, urlOrId];
     const folderId = folderMatch[1] || urlOrId;
 
-    updateStatus('🔄 Querying Google Drive public folder...');
+    updateStatus('🔄 Scanning Google Drive public folder...');
 
     let htmlText = '';
     const proxyUrls = [
@@ -260,7 +241,6 @@
 
     const fileMap = new Map();
 
-    // Pattern A: Match ["FILE_ID", "filename.pdf", ...] in Google Drive stream data
     const jsonMatches = Array.from(htmlText.matchAll(/\["([a-zA-Z0-9_-]{25,50})",\s*"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx|md))"/gi));
     jsonMatches.forEach(m => {
       if (m[1] && m[2] && !m[2].includes('<') && !m[2].includes('>')) {
@@ -268,7 +248,6 @@
       }
     });
 
-    // Pattern B: Match title attribute or filename property before/after /file/d/FILE_ID
     const linkMatches = Array.from(htmlText.matchAll(/\/file\/d\/([a-zA-Z0-9_-]{25,50})[^\n<]*?title="([^"]+\.(?:pdf|docx|txt|csv|xlsx|md))"/gi));
     linkMatches.forEach(m => {
       if (m[1] && m[2]) {
@@ -276,7 +255,6 @@
       }
     });
 
-    // Pattern C: Match filename followed by file ID or vice versa in JSON blobs
     const fileBlobMatches = Array.from(htmlText.matchAll(/"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx|md))"[\s\S]{1,100}?"([a-zA-Z0-9_-]{25,50})"/gi));
     fileBlobMatches.forEach(m => {
       if (m[1] && m[2] && m[2].length >= 28) {
@@ -287,16 +265,54 @@
     const fileList = Array.from(fileMap.entries()).map(([id, name]) => ({ id, name }));
 
     if (fileList.length === 0) {
-      updateStatus('⚠️ No PDF/Word codes found in this Google Drive folder. Ensure files are inside and shared as "Anyone with link can view".', true);
-      return 0;
+      updateStatus('⚠️ No PDF/Word codes found in this Google Drive folder. Ensure folder is shared as "Anyone with link can view".', true);
+      if (elements.driveFilesContainer) elements.driveFilesContainer.classList.add('hidden');
+      return [];
     }
 
-    updateStatus(`📥 Found ${fileList.length} document(s). Downloading & indexing...`);
+    state.fetchedDriveFiles = fileList;
+    renderDriveChecklist(fileList);
+    updateStatus(`✅ Found ${fileList.length} code(s). Select the files you want to import below.`);
+    return fileList;
+  }
+
+  function renderDriveChecklist(files) {
+    if (!elements.driveFilesList || !elements.driveFilesContainer) return;
+    elements.driveFilesList.innerHTML = files.map(f => `
+      <label class="doc-item" style="cursor: pointer; display: flex; gap: 0.5rem; align-items: center;">
+        <input type="checkbox" class="drive-file-cb" data-id="${f.id}" data-name="${f.name}" checked>
+        <span class="doc-name">📄 ${f.name}</span>
+      </label>
+    `).join('');
+    elements.driveFilesContainer.classList.remove('hidden');
+  }
+
+  async function importSelectedDriveFiles() {
+    const cbs = document.querySelectorAll('.drive-file-cb:checked');
+    if (!cbs || cbs.length === 0) {
+      alert('Please select at least one code to import.');
+      return;
+    }
+
+    const selectedFiles = Array.from(cbs).map(cb => ({
+      id: cb.getAttribute('data-id'),
+      name: cb.getAttribute('data-name')
+    }));
+
+    const updateStatus = (msg) => {
+      if (elements.settingsStatus) {
+        elements.settingsStatus.className = 'status-msg';
+        elements.settingsStatus.textContent = msg;
+        elements.settingsStatus.classList.remove('hidden');
+      }
+    };
+
+    updateStatus(`📥 Downloading & parsing ${selectedFiles.length} selected document(s)...`);
     let successCount = 0;
 
-    for (let i = 0; i < fileList.length; i++) {
-      const item = fileList[i];
-      updateStatus(`📥 Parsing (${i + 1}/${fileList.length}): ${item.name}...`);
+    for (let i = 0; i < selectedFiles.length; i++) {
+      const item = selectedFiles[i];
+      updateStatus(`📥 Parsing (${i + 1}/${selectedFiles.length}): ${item.name}...`);
       const downloadUrls = [
         `https://corsproxy.io/?https://drive.google.com/uc?export=download&id=${item.id}`,
         `https://api.allorigins.win/raw?url=${encodeURIComponent('https://drive.google.com/uc?export=download&id=' + item.id)}`
@@ -320,8 +336,7 @@
 
     updateLibraryUI();
     populateDocScopeSelect();
-    updateStatus(`✅ Successfully imported ${successCount} document(s) from Google Drive!`);
-    return successCount;
+    updateStatus(`✅ Successfully imported ${successCount} selected code(s)!`);
   }
 
   // --- Populate Code Scope Selector Dropdown ---
@@ -735,12 +750,25 @@ If the context does not contain enough information, state what is known and clar
           return;
         }
 
-        const driveMatch = cloudUrl.match(/\/folders\/([a-zA-Z0-9_-]+)/);
-        if (driveMatch) {
-          await loadGoogleDriveFolder(driveMatch[1]);
-        } else {
-          await fetchRepoKB();
-        }
+        await scanGoogleDriveFolder(cloudUrl);
+      });
+    }
+
+    if (elements.btnSelectAllDrive) {
+      elements.btnSelectAllDrive.addEventListener('click', () => {
+        document.querySelectorAll('.drive-file-cb').forEach(cb => cb.checked = true);
+      });
+    }
+
+    if (elements.btnDeselectAllDrive) {
+      elements.btnDeselectAllDrive.addEventListener('click', () => {
+        document.querySelectorAll('.drive-file-cb').forEach(cb => cb.checked = false);
+      });
+    }
+
+    if (elements.btnImportSelectedDrive) {
+      elements.btnImportSelectedDrive.addEventListener('click', async () => {
+        await importSelectedDriveFiles();
       });
     }
 
@@ -1001,7 +1029,7 @@ If the context does not contain enough information, state what is known and clar
     if (state.apiKey) {
       discoverUserModels(state.apiKey);
     }
-    console.log('Researcher AI Web App initialized instantly.');
+    console.log('Researcher AI Web App initialized with Google Drive File Picker Checklist.');
   }
 
   window.addEventListener('DOMContentLoaded', init);
