@@ -1,6 +1,6 @@
 /**
  * Researcher AI - Client App Engine
- * Hybrid RAG (BM25 + Gemini Embeddings) with Cloud Storage & Document Selector
+ * Hybrid RAG (BM25 + Gemini Embeddings) with Cloud Storage & Selective Code Picker
  */
 
 (function () {
@@ -203,7 +203,7 @@
     }
   }
 
-  // --- Fetch Direct PDF URL or Dropbox / OneDrive / Drive Share Link ---
+  // --- Fetch Direct Single PDF Link ---
   async function fetchDirectPdfUrl(urlInput) {
     if (!urlInput) return false;
     const updateStatus = (msg, isErr = false) => {
@@ -214,40 +214,29 @@
       }
     };
 
-    if (urlInput.toLowerCase().includes('icloud.com')) {
-      updateStatus('🍏 iCloud Link Detected! On iPhone/Mac, tap "➕ Upload Code" in top bar → select iCloud Drive to pick your codes directly in 1 tap.', false);
-      return false;
-    }
-
     let downloadUrl = urlInput.trim();
     let filename = 'Cloud_Document.pdf';
     const driveMatch = urlInput.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || urlInput.match(/id=([a-zA-Z0-9_-]+)/);
 
     if (urlInput.toLowerCase().includes('dropbox.com')) {
-      downloadUrl = urlInput.replace('www.dropbox.com', 'dl.dropboxusercontent.com').replace('?dl=0', '?dl=1');
-      if (!downloadUrl.includes('dl=1') && !downloadUrl.includes('raw=1')) {
-        downloadUrl += (downloadUrl.includes('?') ? '&dl=1' : '?dl=1');
+      downloadUrl = urlInput.replace('www.dropbox.com', 'dl.dropboxusercontent.com').replace('?dl=0', '?raw=1');
+      if (!downloadUrl.includes('raw=1') && !downloadUrl.includes('dl=1')) {
+        downloadUrl += (downloadUrl.includes('?') ? '&raw=1' : '?raw=1');
       }
       const urlParts = urlInput.split('/');
       const lastPart = urlParts[urlParts.length - 1].split('?')[0];
       if (lastPart && lastPart.toLowerCase().endsWith('.pdf')) {
         filename = decodeURIComponent(lastPart);
-      } else {
-        filename = 'Dropbox_Folder.zip';
       }
     } else if (urlInput.toLowerCase().includes('onedrive.live.com') || urlInput.toLowerCase().includes('1drv.ms')) {
       downloadUrl = urlInput.replace('/redir?', '/download?').replace('/embed?', '/download?');
-      if (!downloadUrl.includes('download')) {
-        downloadUrl += (downloadUrl.includes('?') ? '&download=1' : '?download=1');
-      }
-      filename = 'OneDrive_Folder.zip';
     } else if (driveMatch) {
       const fileId = driveMatch[1];
       downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
       filename = `Google_Drive_Code_${fileId.substring(0, 6)}.pdf`;
     }
 
-    updateStatus(`📥 Fetching cloud link content...`);
+    updateStatus(`📥 Downloading & parsing single PDF code...`);
 
     const fetchUrls = [
       downloadUrl,
@@ -261,29 +250,6 @@
         if (res.ok) {
           const blob = await res.blob();
           if (blob.size > 500) {
-            const isZip = blob.type.includes('zip') || blob.type.includes('compressed') || filename.endsWith('.zip');
-            if (isZip && window.JSZip) {
-              updateStatus(`📦 Unpacking folder ZIP archive...`);
-              const zip = await JSZip.loadAsync(blob);
-              let importedCount = 0;
-              for (const zipPath of Object.keys(zip.files)) {
-                const entry = zip.files[zipPath];
-                if (!entry.dir && (entry.name.toLowerCase().endsWith('.pdf') || entry.name.toLowerCase().endsWith('.docx'))) {
-                  const entryBlob = await entry.async('blob');
-                  const entryName = entry.name.split('/').pop();
-                  const fileObj = new File([entryBlob], entryName, { type: 'application/pdf' });
-                  await processUploadedFile(fileObj);
-                  importedCount++;
-                }
-              }
-              if (importedCount > 0) {
-                updateLibraryUI();
-                populateDocScopeSelect();
-                updateStatus(`✅ Successfully imported ${importedCount} code(s) from folder archive!`);
-                return true;
-              }
-            }
-
             const fileObj = new File([blob], filename, { type: 'application/pdf' });
             const docMeta = await processUploadedFile(fileObj);
             updateLibraryUI();
@@ -297,11 +263,11 @@
       }
     }
 
-    updateStatus(`❌ Could not fetch cloud link. Please check link sharing settings or use "Upload Code" button to pick PDFs directly.`, true);
+    updateStatus(`❌ Could not fetch single PDF link. Use "Upload Code" button to pick PDFs directly from your device.`, true);
     return false;
   }
 
-  // --- Scan Google Drive Folder for File Checklist ---
+  // --- Scan Folder Contents & Present Interactive Checklist ---
   async function scanGoogleDriveFolder(urlOrId) {
     if (!urlOrId) return [];
     const updateStatus = (msg, isErr = false) => {
@@ -312,21 +278,19 @@
       }
     };
 
-    if (urlOrId.includes('dropbox.com') || urlOrId.includes('onedrive.live.com') || urlOrId.includes('1drv.ms') || urlOrId.includes('/file/d/') || urlOrId.endsWith('.pdf')) {
+    if (urlOrId.includes('/file/d/') || urlOrId.endsWith('.pdf')) {
       return await fetchDirectPdfUrl(urlOrId);
     }
 
-    updateStatus('🔄 Scanning Google Drive link(s)...');
+    updateStatus('🔄 Scanning cloud folder contents...');
     const fileMap = new Map();
 
     const folderMatches = Array.from(urlOrId.matchAll(/\/folders\/([a-zA-Z0-9_-]{25,50})/g));
     let folderIds = folderMatches.map(m => m[1]);
 
-    if (folderIds.length === 0 && fileMap.size === 0) {
+    if (folderIds.length === 0) {
       const rawIdMatch = urlOrId.trim().match(/^[a-zA-Z0-9_-]{25,50}$/);
-      if (rawIdMatch) {
-        folderIds = [rawIdMatch[0]];
-      }
+      if (rawIdMatch) folderIds = [rawIdMatch[0]];
     }
 
     for (const folderId of folderIds) {
@@ -365,7 +329,7 @@
 
     state.fetchedDriveFiles = fileList;
     renderDriveChecklist(fileList);
-    updateStatus(`✅ Found ${fileList.length} code document(s). Select the files you want to import below.`);
+    updateStatus(`📋 Found ${fileList.length} code(s). Select the specific PDFs you want to parse below.`);
     return fileList;
   }
 
@@ -1146,7 +1110,7 @@ If the context does not contain enough information, state what is known and clar
     if (state.apiKey) {
       discoverUserModels(state.apiKey);
     }
-    console.log('Researcher AI Web App initialized with Automatic ZIP Unpacker & Multi-Cloud Loader.');
+    console.log('Researcher AI Web App initialized with Selective Checklist UI.');
   }
 
   window.addEventListener('DOMContentLoaded', init);
