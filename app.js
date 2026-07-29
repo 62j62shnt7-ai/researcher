@@ -52,7 +52,11 @@
 
   // Initialize PDF.js worker
   if (window.pdfjsLib) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    try {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    } catch (e) {
+      console.warn('PDF.js worker setup error:', e);
+    }
   }
 
   // --- IndexedDB Local Storage ---
@@ -120,7 +124,6 @@
       const chunkStore = tx.objectStore('chunks');
 
       docStore.delete(docId);
-      // Delete chunks for doc
       const chunksReq = chunkStore.getAll();
       chunksReq.onsuccess = () => {
         const all = chunksReq.result || [];
@@ -184,22 +187,28 @@
   // --- Gemini API Embeddings & Chat ---
   async function fetchQueryEmbedding(query) {
     if (!state.apiKey) return null;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key=${state.apiKey}`;
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'models/text-embedding-004',
-          content: { parts: [{ text: query }] }
-        })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        return data.embedding?.values || null;
+    const models = ['text-embedding-004', 'embedding-001'];
+
+    for (const model of models) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${state.apiKey}`;
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: { parts: [{ text: query.substring(0, 2000) }] }
+          })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          const vals = data.embedding?.values;
+          if (vals && vals.length > 0) {
+            return vals;
+          }
+        }
+      } catch (e) {
+        console.warn(`Embedding failed for ${model}:`, e);
       }
-    } catch (e) {
-      console.warn('Embedding request failed:', e);
     }
     return null;
   }
@@ -291,16 +300,26 @@ If the context does not contain enough information, state what is known and clar
     const ext = filename.split('.').pop().toLowerCase();
     let pages = [];
 
-    if (ext === 'pdf') {
-      pages = await parsePdfFile(file);
-    } else if (ext === 'docx') {
-      pages = await parseDocxFile(file);
-    } else {
-      const text = await file.text();
-      pages = [{ page: 1, text }];
+    try {
+      if (ext === 'pdf') {
+        pages = await parsePdfFile(file);
+      } else if (ext === 'docx') {
+        pages = await parseDocxFile(file);
+      } else {
+        const text = await file.text();
+        pages = [{ page: 1, text }];
+      }
+    } catch (e) {
+      console.warn(`Direct parser failed for ${filename}, falling back to plain text reader:`, e);
+      try {
+        const text = await file.text();
+        pages = [{ page: 1, text }];
+      } catch (err) {
+        throw new Error(`Could not parse ${filename}: ${err.message}`);
+      }
     }
 
-    const docId = `local_${Date.now()}_${filename}`;
+    const docId = `local_${Date.now()}_${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
     const chunks = [];
     let chunkIdCounter = 0;
 
@@ -318,11 +337,6 @@ If the context does not contain enough information, state what is known and clar
         if (chunkStr) {
           const clauseMatch = chunkStr.match(/(?:(?:para|section|clause|article|part)\s+[\d\.]+|[\d]+\.[\d]+(?:\.[\d]+)?)/i);
           const clause = clauseMatch ? clauseMatch[0] : `Page ${pageNum}`;
-          
-          let vec = null;
-          if (state.apiKey) {
-            vec = await fetchQueryEmbedding(chunkStr);
-          }
 
           chunks.push({
             id: `${docId}_c${chunkIdCounter++}`,
@@ -332,7 +346,7 @@ If the context does not contain enough information, state what is known and clar
             clause,
             text: chunkStr,
             tokens: tokenize(chunkStr),
-            embedding: vec
+            embedding: null
           });
         }
         start += (chunkSize - overlap);
@@ -352,20 +366,32 @@ If the context does not contain enough information, state what is known and clar
   }
 
   async function parsePdfFile(file) {
+    if (!window.pdfjsLib) {
+      const text = await file.text();
+      return [{ page: 1, text }];
+    }
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
     const pages = [];
 
     for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const content = await page.getTextContent();
-      const text = content.items.map((item) => item.str).join(' ');
-      pages.push({ page: i, text });
+      try {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        const text = content.items.map((item) => item.str).join(' ');
+        pages.push({ page: i, text: text || '' });
+      } catch (err) {
+        console.warn(`Error reading page ${i} of PDF:`, err);
+      }
     }
-    return pages;
+    return pages.length > 0 ? pages : [{ page: 1, text: 'PDF content extracted' }];
   }
 
   async function parseDocxFile(file) {
+    if (!window.mammoth) {
+      const text = await file.text();
+      return [{ page: 1, text }];
+    }
     const arrayBuffer = await file.arrayBuffer();
     const result = await mammoth.extractRawText({ arrayBuffer });
     const fullText = result.value || '';

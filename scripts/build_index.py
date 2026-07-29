@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build Index Script for Researcher
+Build Index Script for Researcher AI
 Parses engineering codes in codes/ directory, generates chunks, BM25 tokens,
 and optional Gemini vector embeddings, saving the output to knowledge_base.json.
 """
@@ -12,6 +12,7 @@ import re
 import math
 import urllib.request
 import urllib.parse
+import urllib.error
 from pathlib import Path
 
 # Helper for parsing PDF using pypdf or fallback
@@ -23,7 +24,8 @@ def extract_pdf_pages(file_path):
         for idx, page in enumerate(reader.pages):
             text = page.extract_text() or ""
             pages.append({"page": idx + 1, "text": text.strip()})
-        return pages
+        if pages:
+            return pages
     except Exception as e:
         print(f"pypdf extraction failed for {file_path}: {e}")
 
@@ -33,7 +35,8 @@ def extract_pdf_pages(file_path):
             for idx, page in enumerate(pdf.pages):
                 text = page.extract_text() or ""
                 pages.append({"page": idx + 1, "text": text.strip()})
-        return pages
+        if pages:
+            return pages
     except Exception as e:
         print(f"pdfplumber extraction failed for {file_path}: {e}")
 
@@ -49,7 +52,6 @@ def extract_docx_pages(file_path):
             if para.text.strip():
                 full_text.append(para.text.strip())
         text = "\n".join(full_text)
-        # Approximate 1000 chars per page
         chunks_text = [text[i:i+1000] for i in range(0, len(text), 1000)]
         return [{"page": idx + 1, "text": c} for idx, c in enumerate(chunks_text)]
     except Exception as e:
@@ -85,7 +87,6 @@ def chunk_text(pages, filename, max_chars=800, overlap=100):
             end = start + max_chars
             chunk_str = text[start:end].strip()
             if chunk_str:
-                # Detect clauses/sections like "Section 3.2" or "Para 304.1" or "3.1.2"
                 clause_match = re.search(r'(?:(?:para|section|clause|article|part)\s+[\d\.]+|[\d]+\.[\d]+(?:\.[\d]+)?)', chunk_str, re.IGNORECASE)
                 clause = clause_match.group(0) if clause_match else f"Page {page_num}"
                 
@@ -103,22 +104,32 @@ def chunk_text(pages, filename, max_chars=800, overlap=100):
     return chunks
 
 def fetch_gemini_embedding(text, api_key):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={api_key}"
-    payload = {
-        "model": "models/text-embedding-004",
-        "content": {
-            "parts": [{"text": text[:2000]}]
-        }
-    }
-    data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req) as resp:
-            res_json = json.loads(resp.read().decode('utf-8'))
-            return res_json.get("embedding", {}).get("values", [])
-    except Exception as e:
-        print(f"Gemini embedding API call failed: {e}")
+    if not api_key:
         return []
+        
+    models_to_try = ["text-embedding-004", "embedding-001"]
+    
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:embedContent?key={api_key}"
+        payload = {
+            "content": {
+                "parts": [{"text": text[:2000]}]
+            }
+        }
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req) as resp:
+                res_json = json.loads(resp.read().decode('utf-8'))
+                vals = res_json.get("embedding", {}).get("values", [])
+                if vals:
+                    return vals
+        except urllib.error.HTTPError as http_err:
+            print(f"Gemini embedding ({model_name}) HTTP Error {http_err.code}: {http_err.reason}")
+        except Exception as e:
+            print(f"Gemini embedding ({model_name}) error: {e}")
+            
+    return []
 
 def build_knowledge_base():
     codes_dir = Path("codes")
@@ -161,9 +172,10 @@ def build_knowledge_base():
         
         for c in doc_chunks:
             if api_key:
-                print(f"Fetching embedding for chunk {c['id']}...")
+                print(f"Attempting embedding for chunk {c['id']}...")
                 vec = fetch_gemini_embedding(c["text"], api_key)
-                c["embedding"] = vec
+                if vec:
+                    c["embedding"] = vec
             all_chunks.append(c)
             
     kb_data = {
