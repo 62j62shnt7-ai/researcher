@@ -24,7 +24,9 @@
 
   function initElements() {
     elements.apiKeyInput = document.getElementById('api-key-input');
+    elements.embeddingEngineSelect = document.getElementById('embedding-engine-select');
     elements.cloudUrlInput = document.getElementById('cloud-url-input');
+
     elements.btnFetchCloud = document.getElementById('btn-fetch-cloud');
     elements.driveFilesContainer = document.getElementById('drive-files-container');
     elements.driveFilesList = document.getElementById('drive-files-list');

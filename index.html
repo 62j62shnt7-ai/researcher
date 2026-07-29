@@ -142,8 +142,16 @@
             <label for="api-key-input">Gemini API Key</label>
             <input type="password" id="api-key-input" placeholder="AIzaSy..." autocomplete="off">
             <small>Stored locally in your browser. Get free key at aistudio.google.com.</small>
-          </div>
           <div class="form-group" style="margin-top: 1rem;">
+            <label for="embedding-engine-select">Vector Embedding Engine</label>
+            <select id="embedding-engine-select" style="width:100%; padding:0.5rem; border-radius:6px; background:var(--bg-dark, #1e293b); color:var(--text-main, #f8fafc); border:1px solid var(--border-color, #334155); margin-top:0.25rem;">
+              <option value="auto">✨ Transformers.js (Free In-Browser Local ONNX Vector Search — Zero API Keys)</option>
+              <option value="gemini">⚡ Google Gemini API (gemini-embedding-2)</option>
+              <option value="bm25">🔍 Keyword Only (BM25 Exact Code & Clause Search)</option>
+            </select>
+            <small style="display:block; margin-top:0.25rem; color:#94a3b8;">Transformers.js computes vectors inside your browser with 0 API calls &amp; 0 costs.</small>
+          </div>
+
             <label for="cloud-url-input">Cloud Link (Dropbox, OneDrive, Drive, or PDF URL)</label>
             <div style="display: flex; gap: 0.5rem;">
               <input type="url" id="cloud-url-input" placeholder="Dropbox, OneDrive, Drive link, or direct PDF URL..." autocomplete="off" style="flex: 1;">
