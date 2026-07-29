@@ -214,6 +214,11 @@
       }
     };
 
+    if (urlInput.toLowerCase().includes('icloud.com')) {
+      updateStatus('🍏 iCloud Link Detected! On iPhone/Mac, tap "➕ Upload Code" in top bar → select iCloud Drive to pick your codes directly in 1 tap.', false);
+      return false;
+    }
+
     let downloadUrl = urlInput.trim();
     let filename = 'Cloud_Document.pdf';
 
