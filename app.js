@@ -561,8 +561,9 @@
       throw new Error('Please set your Gemini API key in Settings first.');
     }
 
-    const selectedModel = (elements.chatModelSelect && elements.chatModelSelect.value) || state.model || 'gemini-2.0-flash';
-    const modelsToTry = [selectedModel, 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'].filter((m, i, arr) => m && arr.indexOf(m) === i);
+    const selectedModel = (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value) || state.model || 'gemini-2.0-flash';
+    const modelsToTry = [selectedModel, 'gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-flash'].filter((m, i, arr) => m && arr.indexOf(m) === i);
+
     let lastError = null;
 
     let contextText = '';
@@ -1057,11 +1058,13 @@ If the context does not contain enough information, state what is known and clar
         const chatModels = [
           ...discovered,
           elements.chatModelSelect?.value,
+          elements.modelSelect?.value,
           state.model,
           'gemini-2.0-flash',
-          'gemini-1.5-flash',
-          'gemini-1.5-pro'
+          'gemini-2.5-flash',
+          'gemini-1.5-flash'
         ].filter((m, i, arr) => m && arr.indexOf(m) === i);
+
         let workingChatModel = '';
 
         for (const cm of chatModels) {

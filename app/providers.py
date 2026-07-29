@@ -197,7 +197,8 @@ def test_connection(cfg: dict) -> dict:
                 data = r.json()
                 models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])
                           if "generateContent" in m.get("supportedGenerationMethods", [])]
-                return {"ok": True, "models": models or ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]}
+                return {"ok": True, "models": models or ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]}
+
         from .embeddings import list_models
         models = list_models(cfg.get("base_url", ""), cfg.get("api_key", ""))
         return {"ok": True, "models": models}
