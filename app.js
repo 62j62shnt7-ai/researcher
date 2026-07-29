@@ -218,8 +218,8 @@
       throw new Error('Please set your Gemini API key in Settings first.');
     }
 
-    const modelName = state.model || 'gemini-2.5-flash';
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${state.apiKey}`;
+    const modelsToTry = [state.model || 'gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+    let lastError = null;
 
     let contextText = '';
     if (retrievedChunks && retrievedChunks.length > 0) {
@@ -250,21 +250,30 @@ If the context does not contain enough information, state what is known and clar
       generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }
     };
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
+    for (const modelName of modelsToTry) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${state.apiKey}`;
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
 
-    if (!res.ok) {
-      const errJson = await res.json().catch(() => ({}));
-      throw new Error(errJson.error?.message || `API Error (${res.status})`);
+        if (res.ok) {
+          const data = await res.json();
+          const candidate = data.candidates?.[0];
+          const answer = candidate?.content?.parts?.map(p => p.text).join('') || 'No response generated.';
+          return answer;
+        } else {
+          const errJson = await res.json().catch(() => ({}));
+          lastError = new Error(errJson.error?.message || `HTTP ${res.status}`);
+        }
+      } catch (e) {
+        lastError = e;
+      }
     }
 
-    const data = await res.json();
-    const candidate = data.candidates?.[0];
-    const answer = candidate?.content?.parts?.map(p => p.text).join('') || 'No response generated.';
-    return answer;
+    throw lastError || new Error('Failed to communicate with Gemini API.');
   }
 
   // --- Hybrid Retriever ---
@@ -410,7 +419,6 @@ If the context does not contain enough information, state what is known and clar
     const totalCount = repoDocs.length + state.localDocs.length;
     elements.libCount.textContent = totalCount;
 
-    // Render Repo Docs
     if (repoDocs.length === 0) {
       elements.repoDocsList.innerHTML = '<p class="doc-meta">No pre-indexed standards in repo yet.</p>';
     } else {
@@ -425,7 +433,6 @@ If the context does not contain enough information, state what is known and clar
       `).join('');
     }
 
-    // Render Local Docs
     if (state.localDocs.length === 0) {
       elements.localDocsList.innerHTML = '<p class="doc-meta">No local documents uploaded yet.</p>';
     } else {
@@ -490,7 +497,6 @@ If the context does not contain enough information, state what is known and clar
 
   // --- Event Listeners ---
   function setupEventListeners() {
-    // Settings Modal
     elements.btnSettings.addEventListener('click', () => {
       elements.apiKeyInput.value = state.apiKey;
       elements.settingsModal.classList.remove('hidden');
@@ -521,30 +527,61 @@ If the context does not contain enough information, state what is known and clar
         return;
       }
       elements.settingsStatus.className = 'status-msg';
-      elements.settingsStatus.textContent = 'Testing connection to Gemini...';
+      elements.settingsStatus.textContent = 'Testing connection to Gemini AI...';
       elements.settingsStatus.classList.remove('hidden');
 
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${testKey}`;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Hello' }] }] })
-        });
-        if (res.ok) {
-          elements.settingsStatus.className = 'status-msg success';
-          elements.settingsStatus.textContent = 'Connection Successful! Gemini 2.5 Flash is ready.';
-        } else {
-          const err = await res.json().catch(() => ({}));
-          throw new Error(err.error?.message || `HTTP ${res.status}`);
-        }
-      } catch (e) {
+      let chatStatus = false;
+      let embedStatus = false;
+
+      // Test Chat Endpoint
+      const chatModels = ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+      let workingChatModel = '';
+
+      for (const cm of chatModels) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${cm}:generateContent?key=${testKey}`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Ping' }] }] })
+          });
+          if (res.ok) {
+            chatStatus = true;
+            workingChatModel = cm;
+            break;
+          }
+        } catch (e) {}
+      }
+
+      // Test Embeddings Endpoint
+      const embedModels = ['text-embedding-004', 'embedding-001'];
+      let workingEmbedModel = '';
+
+      for (const em of embedModels) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${em}:embedContent?key=${testKey}`;
+          const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content: { parts: [{ text: 'Ping' }] } })
+          });
+          if (res.ok) {
+            embedStatus = true;
+            workingEmbedModel = em;
+            break;
+          }
+        } catch (e) {}
+      }
+
+      if (chatStatus) {
+        elements.settingsStatus.className = 'status-msg success';
+        elements.settingsStatus.textContent = `✔️ Chat Ready (${workingChatModel}) | ${embedStatus ? `✔️ Embedder Ready (${workingEmbedModel})` : '⚠️ Keyword-Only Retrieval'}`;
+      } else {
         elements.settingsStatus.className = 'status-msg error';
-        elements.settingsStatus.textContent = `Connection Failed: ${e.message}`;
+        elements.settingsStatus.textContent = '❌ Invalid API Key or network blocked. Please check your key at aistudio.google.com.';
       }
     });
 
-    // Library Modal
     elements.btnLibrary.addEventListener('click', () => {
       updateLibraryUI();
       elements.libraryModal.classList.remove('hidden');
@@ -554,7 +591,6 @@ If the context does not contain enough information, state what is known and clar
       elements.libraryModal.classList.add('hidden');
     });
 
-    // File Upload Handler
     elements.btnUpload.addEventListener('click', () => {
       elements.fileInput.click();
     });
@@ -576,7 +612,6 @@ If the context does not contain enough information, state what is known and clar
       elements.fileInput.value = '';
     });
 
-    // Filter Pills
     elements.filterPills.forEach((pill) => {
       pill.addEventListener('click', (e) => {
         elements.filterPills.forEach((p) => p.classList.remove('active'));
@@ -585,7 +620,6 @@ If the context does not contain enough information, state what is known and clar
       });
     });
 
-    // Instant Search Input
     let searchTimeout;
     elements.searchInput.addEventListener('input', (e) => {
       const val = e.target.value.trim();
@@ -625,7 +659,6 @@ If the context does not contain enough information, state what is known and clar
       elements.searchResultsSection.classList.add('hidden');
     });
 
-    // Chat Form Submit
     elements.chatForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const prompt = elements.chatInput.value.trim();
@@ -649,7 +682,6 @@ If the context does not contain enough information, state what is known and clar
       }
     });
 
-    // Backup Export / Import
     elements.btnExportDb.addEventListener('click', () => {
       const backupData = {
         documents: state.localDocs,
@@ -688,7 +720,6 @@ If the context does not contain enough information, state what is known and clar
     });
   }
 
-  // --- App Initialization ---
   async function init() {
     await initIndexedDB();
     await fetchRepoKB();
