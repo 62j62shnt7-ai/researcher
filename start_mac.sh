@@ -21,10 +21,12 @@ if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)'; th
 fi
 echo "Using $($PY --version)"
 
-# --- detect a venv copied from another OS (Windows uses Scripts\, not bin/) and rebuild ---
-if [ -d .venv ] && [ ! -f .venv/bin/activate ]; then
-    echo "Found a .venv from another OS - rebuilding for Mac..."
-    rm -rf .venv
+# --- detect a venv copied from another OS or moved from another folder and rebuild ---
+if [ -d .venv ]; then
+    if [ ! -f .venv/bin/activate ] || ! grep -F -q "$PWD/.venv" .venv/bin/activate 2>/dev/null; then
+        echo "Found an invalid, moved, or cross-OS .venv - rebuilding..."
+        rm -rf .venv
+    fi
 fi
 
 # --- create venv + install deps on first run ---

@@ -685,7 +685,7 @@ If the context does not contain enough information, state what is known and clar
     try {
       if (ext === 'pdf') {
         pages = await parsePdfFile(file);
-      } else if (ext === 'docx') {
+      } else if (ext === 'docx' || ext === 'doc') {
         pages = await parseDocxFile(file);
       } else {
         const text = await file.text();
@@ -834,20 +834,31 @@ If the context does not contain enough information, state what is known and clar
   }
 
   async function parseDocxFile(file) {
-    if (!window.mammoth) {
+    if (window.mammoth) {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        const fullText = (result.value || '').trim();
+        if (fullText) {
+          const chunkSize = 1000;
+          const pages = [];
+          let p = 1;
+          for (let i = 0; i < fullText.length; i += chunkSize) {
+            pages.push({ page: p++, text: fullText.slice(i, i + chunkSize) });
+          }
+          return pages;
+        }
+      } catch (e) {
+        console.warn('Mammoth docx extraction failed, using text fallback:', e);
+      }
+    }
+    try {
       const text = await file.text();
-      return [{ page: 1, text }];
+      const cleanText = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ' ').trim();
+      return [{ page: 1, text: cleanText }];
+    } catch (err) {
+      return [{ page: 1, text: '' }];
     }
-    const arrayBuffer = await file.arrayBuffer();
-    const result = await mammoth.extractRawText({ arrayBuffer });
-    const fullText = result.value || '';
-    const chunkSize = 1000;
-    const pages = [];
-    let p = 1;
-    for (let i = 0; i < fullText.length; i += chunkSize) {
-      pages.push({ page: p++, text: fullText.slice(i, i + chunkSize) });
-    }
-    return pages;
   }
 
   // --- UI Renderers & Handlers ---

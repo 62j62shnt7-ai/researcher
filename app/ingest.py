@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 
 SUPPORTED_EXTS = {
-    ".pdf", ".docx", ".xlsx", ".xlsm", ".csv", ".tsv",
+    ".pdf", ".docx", ".doc", ".xlsx", ".xlsm", ".csv", ".tsv",
     ".pptx", ".txt", ".md", ".markdown", ".rst", ".html", ".htm", ".log",
 }
 
@@ -146,31 +146,72 @@ def _parse_pdf(path: str) -> tuple[list[dict], int]:
     return blocks, n_pages
 
 
+def _extract_binary_text(path: str) -> str:
+    """Fallback text extraction for legacy binary .doc or corrupted docx files."""
+    try:
+        content = Path(path).read_bytes()
+        ascii_strings = re.findall(rb'[\x20-\x7e\t\r\n]{4,}', content)
+        text_lines = []
+        for b in ascii_strings:
+            try:
+                s = b.decode("utf-8", errors="ignore").strip()
+                if len(s) > 3 and not s.startswith("<w:") and not s.startswith("<?xml") and not s.startswith("PK"):
+                    text_lines.append(s)
+            except Exception:
+                pass
+        return "\n".join(text_lines)
+    except Exception:
+        return ""
+
+
 def _parse_docx(path: str) -> tuple[list[dict], int]:
-    import docx
-    d = docx.Document(path)
     blocks, buf, section = [], [], "start"
-    for para in d.paragraphs:
-        t = para.text.strip()
-        if not t:
-            continue
-        if para.style.name.startswith("Heading"):
-            if buf:
-                blocks.append({"text": "\n".join(buf), "location": f"§ {section}"})
-                buf = []
-            section = t[:80]
-            buf.append(t)
-        else:
-            buf.append(t)
-    if buf:
-        blocks.append({"text": "\n".join(buf), "location": f"§ {section}"})
-    for ti, table in enumerate(d.tables, 1):
-        rows = []
-        for row in table.rows:
-            rows.append(" | ".join(c.text.strip() for c in row.cells))
-        t = "\n".join(rows).strip()
-        if t:
-            blocks.append({"text": "[Table]\n" + t, "location": f"table {ti}"})
+
+    try:
+        import docx
+        d = docx.Document(path)
+
+        for para in d.paragraphs:
+            t = para.text.strip()
+            if not t:
+                continue
+
+            is_heading = False
+            try:
+                if para.style and getattr(para.style, "name", None) and str(para.style.name).startswith("Heading"):
+                    is_heading = True
+            except Exception:
+                is_heading = False
+
+            if is_heading:
+                if buf:
+                    blocks.append({"text": "\n".join(buf), "location": f"§ {section}"})
+                    buf = []
+                section = t[:80]
+                buf.append(t)
+            else:
+                buf.append(t)
+        if buf:
+            blocks.append({"text": "\n".join(buf), "location": f"§ {section}"})
+            buf = []
+
+        for ti, table in enumerate(d.tables, 1):
+            rows = []
+            for row in table.rows:
+                row_str = " | ".join(c.text.strip() for c in row.cells if c.text.strip())
+                if row_str:
+                    rows.append(row_str)
+            t = "\n".join(rows).strip()
+            if t:
+                blocks.append({"text": "[Table]\n" + t, "location": f"table {ti}"})
+    except Exception as e:
+        print(f"python-docx parsing failed for {path}: {e}")
+
+    if not blocks:
+        fallback_text = _extract_binary_text(path)
+        if fallback_text.strip():
+            blocks.append({"text": fallback_text, "location": "file"})
+
     return blocks, 0
 
 
@@ -240,7 +281,7 @@ def parse_file(path: str, fmt: str) -> tuple[list[dict], int]:
     """Returns (blocks, page_count)."""
     if fmt == "pdf":
         return _parse_pdf(path)
-    if fmt == "docx":
+    if fmt in ("docx", "doc"):
         return _parse_docx(path)
     if fmt in ("xlsx", "xlsm"):
         return _parse_xlsx(path)

@@ -44,15 +44,33 @@ def extract_pdf_pages(file_path):
     return pages
 
 def extract_docx_pages(file_path):
+    full_text = []
     try:
         import docx
         doc = docx.Document(file_path)
-        full_text = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-        text = "\n".join(full_text)
-        chunks_text = [text[i:i+1000] for i in range(0, len(text), 1000)]
-        return [{"page": idx + 1, "text": c} for idx, c in enumerate(chunks_text)]
+        for para in doc.paragraphs:
+            if para.text.strip():
+                full_text.append(para.text.strip())
+        for table in doc.tables:
+            for row in table.rows:
+                r_text = " | ".join(c.text.strip() for c in row.cells if c.text.strip())
+                if r_text:
+                    full_text.append(r_text)
     except Exception as e:
-        return []
+        print(f"DOCX extraction failed for {file_path}: {e}")
+
+    text = "\n".join(full_text)
+    if not text.strip():
+        try:
+            with open(file_path, "rb") as f:
+                content = f.read()
+                ascii_strings = re.findall(rb'[\x20-\x7e\t\r\n]{4,}', content)
+                text = "\n".join(b.decode("utf-8", errors="ignore").strip() for b in ascii_strings if len(b) > 4 and not b.startswith(b"<w:"))
+        except Exception:
+            text = ""
+
+    chunks_text = [text[i:i+1000] for i in range(0, len(text), 1000) if text[i:i+1000].strip()]
+    return [{"page": idx + 1, "text": c} for idx, c in enumerate(chunks_text)]
 
 def extract_text_pages(file_path):
     try:
