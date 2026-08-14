@@ -136,13 +136,13 @@ def discover_embedding_model(api_key):
     except Exception as e:
         print(f"Could not query models list: {e}")
 
-    return "gemini-embedding-2"
+    return "text-embedding-004"
 
 def fetch_gemini_embedding(text, api_key, model_name):
     if not api_key or not model_name:
         return []
     if "embedding-001" in model_name:
-        model_name = "gemini-embedding-2"
+        model_name = "text-embedding-004"
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:embedContent"
     payload = {
