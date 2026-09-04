@@ -149,7 +149,7 @@ a.cite:hover{text-decoration:underline}
          accept=".pdf,.docx,.doc,.xlsx,.xlsm,.csv,.tsv,.pptx,.txt,.md,.markdown,.rst,.html,.htm,.log">
   <div class="secHead">Chat history</div>
   <div id="chatList"></div>
-  <div class="secHead">Documents</div>
+  <div class="secHead" style="display:flex;align-items:center;justify-content:space-between"><span>Documents</span><button id="quickScanBtn" onclick="quickScanWatchFolders()" class="smallbtn" style="margin:0;padding:2px 8px;font-size:10.5px" title="Scan watched folders now">⚡ Scan Folders</button></div>
   <div id="selBar"><span id="selInfo"></span><a onclick="selectAll(true)">all</a><a onclick="selectAll(false)">none</a><a onclick="clearAllDocs()" style="color:var(--bad);margin-left:auto;cursor:pointer" title="Delete all documents from library">clear all</a><select id="collectionFilter" onchange="collectionChanged()" title="Filter by collection"><option value="">all collections</option></select></div>
 
   <div id="docList"></div>
@@ -404,8 +404,24 @@ async function checkStatus(){
   try{
     const r = await fetch('/api/test/embeddings'); const d = await r.json();
     $('embDot').className = 'dot ' + (d.ok?'ok':'bad');
-    $('embStatus').textContent = d.ok ? 'vector search on' : 'keyword search only';
+    const pName = d.provider === 'local' ? 'Local CPU' : (d.provider === 'gemini' ? 'Gemini' : (d.provider || 'vector'));
+    $('embStatus').textContent = d.ok ? `vector search on (${pName} · ${d.dim}d)` : 'keyword search only';
   }catch{ $('embDot').className='dot bad'; $('embStatus').textContent='keyword search only'; }
+}
+
+async function quickScanWatchFolders(){
+  const btn = $('quickScanBtn');
+  if(btn) { btn.textContent = 'Scanning…'; btn.disabled = true; }
+  try {
+    const res = await fetch('/api/watch/scan', {method: 'POST'});
+    const data = await res.json();
+    alert(`Watched folders scanned:\n• Added: ${data.added}\n• Updated: ${data.updated}\nIndexing proceeds in the background.`);
+    refreshDocs();
+  } catch(e) {
+    alert('Folder scan failed: ' + e.message);
+  } finally {
+    if(btn) { btn.textContent = '⚡ Scan Folders'; btn.disabled = false; }
+  }
 }
 
 // ---------- chat ----------
@@ -689,7 +705,7 @@ $('s_provider').onchange = ()=>{
     $('s_model').value='claude-sonnet-4-6';
   } else if($('s_provider').value==='gemini'){
     $('s_base').value='https://generativelanguage.googleapis.com';
-    $('s_model').value='gemini-1.5-flash';
+    $('s_model').value='gemini-3-flash-preview';
     $('s_embProvider').value='gemini';
     $('s_embBase').value='https://generativelanguage.googleapis.com';
     $('s_embModel').value='gemini-embedding-2';

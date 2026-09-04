@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -64,10 +65,10 @@ def _index_document(doc_id: int):
         store.set_doc_meta(doc_id, pages=pages, chunk_count=len(chunks))
 
         ecfg = dict(cfg["embeddings"])
+        if not ecfg.get("api_key") and cfg.get("chat", {}).get("api_key"):
+            ecfg["api_key"] = cfg["chat"]["api_key"]
         if ecfg.get("provider") != "local" and cfg.get("chat", {}).get("provider") == "gemini":
             ecfg["provider"] = "gemini"
-            if not ecfg.get("api_key"):
-                ecfg["api_key"] = cfg.get("chat", {}).get("api_key", "")
 
         if ecfg.get("enabled", True):
 
@@ -92,8 +93,10 @@ def _index_document(doc_id: int):
 
 
 
+_index_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="doc-indexer")
+
 def _index_async(doc_id: int):
-    threading.Thread(target=_index_document, args=(doc_id,), daemon=True).start()
+    _index_executor.submit(_index_document, doc_id)
 
 
 # ---------------- watch folders: auto-index new/changed files ----------------
@@ -110,6 +113,8 @@ def _scan_watch_folders(sync: bool = True) -> dict:
             try:
                 if not f.is_file():
                     continue
+                if f.name.startswith((".", "~$")) or f.name in ("Thumbs.db", "desktop.ini"):
+                    continue
                 fmt = ingest.detect_format(f.name)
                 if fmt == "unknown":
                     continue
@@ -120,13 +125,13 @@ def _scan_watch_folders(sync: bool = True) -> dict:
                     store.set_doc_mtime(doc_id, mtime)
                     (_index_document if sync else _index_async)(doc_id)
                     added += 1
-                elif existing.get("file_mtime") and mtime > existing["file_mtime"] + 1:
+                elif existing.get("file_mtime") is None or mtime > (existing.get("file_mtime") or 0) + 1:
                     store.set_doc_mtime(existing["id"], mtime)
                     (_index_document if sync else _index_async)(existing["id"])
                     updated += 1
             except Exception:
                 continue
-    return {"added": added, "updated": updated}
+        return {"added": added, "updated": updated}
 
 
 def _watch_loop():
@@ -294,15 +299,16 @@ def test_chat():
 def test_embeddings():
     cfg = load_config()
     ecfg = dict(cfg.get("embeddings", {}))
+    if not ecfg.get("api_key") and cfg.get("chat", {}).get("api_key"):
+        ecfg["api_key"] = cfg["chat"]["api_key"]
     if ecfg.get("provider") != "local" and cfg.get("chat", {}).get("provider") == "gemini":
         ecfg["provider"] = "gemini"
-        if not ecfg.get("api_key"):
-            ecfg["api_key"] = cfg.get("chat", {}).get("api_key", "")
 
     try:
         from .embeddings import embed_texts
         emb = embed_texts(["connection test"], ecfg)
-        return {"ok": True, "dim": len(emb[0])}
+        prov = ecfg.get("provider", "local")
+        return {"ok": True, "dim": len(emb[0]), "provider": prov}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

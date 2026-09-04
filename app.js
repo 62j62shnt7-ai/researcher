@@ -839,8 +839,7 @@ If context is insufficient, state clearly what is specified in the codes and wha
       // Batch embedding strategy: batchEmbedContents for Gemini API (up to 16 chunks per request)
       if (state.apiKey) {
         const batchSize = 16;
-        const embedModel = 'text-embedding-004';
-        const batchUrl = `https://generativelanguage.googleapis.com/v1beta/models/${embedModel}:batchEmbedContents`;
+        const candidateModels = ['gemini-embedding-2', 'text-embedding-004'];
 
         for (let i = 0; i < totalChunks; i += batchSize) {
           const slice = chunks.slice(i, i + batchSize);
@@ -853,31 +852,35 @@ If context is insufficient, state clearly what is specified in the codes and wha
           if (progressPercent) progressPercent.textContent = `${percent}%`;
           if (progressBarFill) progressBarFill.style.width = `${percent}%`;
 
-          const requests = slice.map(c => ({
-            model: `models/${embedModel}`,
-            content: { parts: [{ text: c.text.substring(0, 8000) }] }
-          }));
-
           let batchSuccess = false;
-          try {
-            const res = await fetch(batchUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
-              body: JSON.stringify({ requests })
-            });
+          for (const embedModel of candidateModels) {
+            const batchUrl = `https://generativelanguage.googleapis.com/v1beta/models/${embedModel}:batchEmbedContents`;
+            const requests = slice.map(c => ({
+              model: `models/${embedModel}`,
+              content: { parts: [{ text: c.text.substring(0, 8000) }] }
+            }));
 
-            if (res.ok) {
-              const data = await res.json();
-              const embeddings = data.embeddings || [];
-              embeddings.forEach((emb, idx) => {
-                if (emb.values && slice[idx]) {
-                  slice[idx].embedding = emb.values;
-                }
+            try {
+              const res = await fetch(batchUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
+                body: JSON.stringify({ requests })
               });
-              batchSuccess = true;
+
+              if (res.ok) {
+                const data = await res.json();
+                const embeddings = data.embeddings || [];
+                embeddings.forEach((emb, idx) => {
+                  if (emb.values && slice[idx]) {
+                    slice[idx].embedding = emb.values;
+                  }
+                });
+                batchSuccess = true;
+                break;
+              }
+            } catch (e) {
+              console.warn(`Batch embedding error with ${embedModel}:`, e);
             }
-          } catch (e) {
-            console.warn('Batch embedding error, falling back to sequential:', e);
           }
 
           if (!batchSuccess) {
@@ -1028,9 +1031,10 @@ If context is insufficient, state clearly what is specified in the codes and wha
       if (state.localDocs.length === 0) {
         elements.localDocsList.innerHTML = '<p class="doc-meta">No local documents uploaded yet.</p>';
       } else {
+        const totalLocalChunks = state.localDocs.reduce((acc, d) => acc + (d.chunkCount || 0), 0);
         elements.localDocsList.innerHTML = `
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-            <span class="doc-meta" style="font-weight:600;">${state.localDocs.length} local document(s)</span>
+            <span class="doc-meta" style="font-weight:600;">${state.localDocs.length} local document(s) • ${totalLocalChunks} chunks</span>
             <button id="btn-clear-all-local" class="btn-text-only" style="color:var(--bad, #e0635c); font-size:0.8rem; cursor:pointer;" type="button">🗑️ Clear All</button>
           </div>
         ` + state.localDocs.map(d => `
@@ -1543,6 +1547,9 @@ If context is insufficient, state clearly what is specified in the codes and wha
           elements.filterPills.forEach((p) => p.classList.remove('active'));
           e.currentTarget.classList.add('active');
           state.activeFilter = e.currentTarget.getAttribute('data-filter');
+          if (elements.searchInput && elements.searchInput.value.trim()) {
+            elements.searchInput.dispatchEvent(new Event('input'));
+          }
         });
       });
     }

@@ -13,8 +13,8 @@ from .config import DB_PATH, DATA_DIR
 _lock = threading.RLock()
 _conn: Optional[sqlite3.Connection] = None
 
-# In-memory vector cache: (chunk_ids: list[int], matrix: np.ndarray normalized) or None
-_vec_cache = None
+# In-memory vector cache: dict mapping dim -> (chunk_ids: list[int], matrix: np.ndarray normalized)
+_vec_cache: dict[int, tuple[list[int], np.ndarray]] = {}
 
 
 def get_conn() -> sqlite3.Connection:
@@ -87,7 +87,7 @@ def _init_schema(c: sqlite3.Connection):
 
 def _invalidate_vec_cache():
     global _vec_cache
-    _vec_cache = None
+    _vec_cache.clear()
 
 
 # ---------------- documents ----------------
@@ -264,33 +264,45 @@ def keyword_search(q: str, limit: int = 30, doc_ids: list[int] = None) -> list[d
         return out
 
 
-def _load_vec_cache():
+def _load_vec_cache(target_dim: Optional[int] = None):
     global _vec_cache
-    if _vec_cache is not None:
-        return _vec_cache
+    if target_dim is not None and target_dim in _vec_cache:
+        return _vec_cache[target_dim]
+
     with _lock:
         c = get_conn()
-        rows = c.execute("SELECT chunk_id, dim, embedding FROM vectors").fetchall()
+        if target_dim is not None:
+            rows = c.execute("SELECT chunk_id, dim, embedding FROM vectors WHERE dim=?", (target_dim,)).fetchall()
+        else:
+            rows = c.execute("SELECT chunk_id, dim, embedding FROM vectors").fetchall()
+
         if not rows:
-            _vec_cache = ([], None)
-            return _vec_cache
-        dim = rows[0]["dim"]
+            return ([], None)
+
+        dim = target_dim or rows[0]["dim"]
         ids, mats = [], []
         for r in rows:
-            if r["dim"] != dim:
-                continue  # skip vectors from a different embedding model
-            ids.append(r["chunk_id"])
-            mats.append(np.frombuffer(r["embedding"], dtype=np.float32))
+            if r["dim"] == dim:
+                ids.append(r["chunk_id"])
+                mats.append(np.frombuffer(r["embedding"], dtype=np.float32))
+
+        if not mats:
+            return ([], None)
+
         mat = np.vstack(mats)
         norms = np.linalg.norm(mat, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
         mat = mat / norms
-        _vec_cache = (ids, mat)
-        return _vec_cache
+        cached = (ids, mat)
+        _vec_cache[dim] = cached
+        return cached
 
 
 def vector_search(query_emb: list[float], limit: int = 30, doc_ids: list[int] = None) -> list[dict]:
-    ids, mat = _load_vec_cache()
+    if not query_emb:
+        return []
+    target_dim = len(query_emb)
+    ids, mat = _load_vec_cache(target_dim=target_dim)
     if mat is None or not ids:
         return []
     q = np.asarray(query_emb, dtype=np.float32)
@@ -301,25 +313,42 @@ def vector_search(query_emb: list[float], limit: int = 30, doc_ids: list[int] = 
         return []
     sims = mat @ (q / qn)
     order = np.argsort(-sims)
+
+    candidate_cids = []
+    cid_to_score = {}
+    for i in order:
+        cid = ids[int(i)]
+        candidate_cids.append(cid)
+        cid_to_score[cid] = float(sims[int(i)])
+        if len(candidate_cids) >= limit * 3:
+            break
+
+    if not candidate_cids:
+        return []
+
     out = []
     allowed = set(doc_ids) if doc_ids else None
     with _lock:
         c = get_conn()
-        for i in order:
-            if len(out) >= limit:
-                break
-            cid = ids[int(i)]
-            r = c.execute(
-                "SELECT ch.id, ch.doc_id, ch.idx, ch.text, ch.location, d.filename FROM chunks ch JOIN documents d ON d.id=ch.doc_id WHERE ch.id=?",
-                (cid,),
-            ).fetchone()
-            if not r:
-                continue
-            d = dict(r)
-            if allowed and d["doc_id"] not in allowed:
-                continue
-            d["score"] = float(sims[int(i)])
-            out.append(d)
+        qmarks = ",".join("?" * len(candidate_cids))
+        sql = f"""
+            SELECT ch.id, ch.doc_id, ch.idx, ch.text, ch.location, d.filename
+            FROM chunks ch
+            JOIN documents d ON d.id = ch.doc_id
+            WHERE ch.id IN ({qmarks})
+        """
+        rows = c.execute(sql, candidate_cids).fetchall()
+        rows_by_id = {r["id"]: dict(r) for r in rows}
+
+        for cid in candidate_cids:
+            if cid in rows_by_id:
+                d = rows_by_id[cid]
+                if allowed and d["doc_id"] not in allowed:
+                    continue
+                d["score"] = cid_to_score[cid]
+                out.append(d)
+                if len(out) >= limit:
+                    break
     return out
 
 
