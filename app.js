@@ -9,7 +9,7 @@
   // Global State
   const state = {
     apiKey: localStorage.getItem('gemini_api_key') || '',
-    model: localStorage.getItem('gemini_model') || 'gemini-2.5-flash',
+    model: localStorage.getItem('gemini_model') || 'gemini-3-flash-preview',
     discoveredModels: [],
     cloudUrl: localStorage.getItem('cloud_storage_url') || '',
 
@@ -104,13 +104,16 @@
       }
 
       const generateModels = models.filter(m => m.supportedGenerationMethods?.includes('generateContent'));
-      // Sort to prioritize latest models (2.5-flash, 2.5-pro, 2.0-flash)
+      // Sort to prioritize latest models (3-flash-preview, 3.8-flash, 3.7-flash, 3.5-flash, flash-latest, gemma-4)
       generateModels.sort((a, b) => {
         const getPriority = (name) => {
-          if (name.includes('2.5-flash')) return 1;
-          if (name.includes('2.5-pro')) return 2;
-          if (name.includes('2.0-flash')) return 3;
-          if (name.includes('1.5-flash')) return 4;
+          if (name.includes('3-flash-preview')) return 1;
+          if (name.includes('3.8-flash')) return 2;
+          if (name.includes('3.7-flash')) return 3;
+          if (name.includes('3.5-flash')) return 4;
+          if (name.includes('flash-latest')) return 5;
+          if (name.includes('gemma-4')) return 6;
+          if (name.includes('pro')) return 8;
           return 10;
         };
         return getPriority(a.name) - getPriority(b.name);
@@ -590,8 +593,8 @@
       throw new Error('Please set your Gemini API key in Settings first.');
     }
 
-    const selectedModel = state.model || (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value) || 'gemini-2.5-flash';
-    const fallbackList = (state.discoveredModels && state.discoveredModels.length > 0) ? state.discoveredModels : ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
+    const selectedModel = state.model || (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value) || 'gemini-3-flash-preview';
+    const fallbackList = (state.discoveredModels && state.discoveredModels.length > 0) ? state.discoveredModels : ['gemini-3-flash-preview', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemma-4-31b-it'];
     const modelsToTry = [selectedModel, ...fallbackList].filter((m, i, arr) => m && arr.indexOf(m) === i);
 
     let lastError = null;
@@ -633,14 +636,14 @@ If context is insufficient, state clearly what is specified in the codes and wha
     const isDeepReasoning = elements.deepReasoningToggle ? elements.deepReasoningToggle.checked : true;
 
     for (const modelName of modelsToTry) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${state.apiKey}`;
 
       const generationConfig = {
         temperature: 0.2,
         maxOutputTokens: 8192
       };
 
-      if (isDeepReasoning && (modelName.includes('2.5') || modelName.includes('3') || modelName.includes('flash') || modelName.includes('pro'))) {
+      if (isDeepReasoning && (modelName.includes('thinking') || modelName.includes('3') || modelName.includes('flash'))) {
         generationConfig.thinkingConfig = {
           thinkingBudget: 2048
         };

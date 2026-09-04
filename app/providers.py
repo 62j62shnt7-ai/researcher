@@ -112,7 +112,7 @@ def _stream_gemini(messages: list[dict], cfg: dict):
     api_key = cfg.get("api_key", "")
     if not api_key:
         raise ProviderError("Google Gemini provider requires an API key. Open Settings.")
-    model = cfg.get("model") or "gemini-2.5-flash"
+    requested_model = cfg.get("model") or "gemini-3-flash-preview"
     base = (cfg.get("base_url") or "https://generativelanguage.googleapis.com").rstrip("/")
     if base.endswith("/v1beta") or base.endswith("/v1"):
         base = base.rsplit("/", 1)[0]
@@ -125,52 +125,76 @@ def _stream_gemini(messages: list[dict], cfg: dict):
         role = "model" if m["role"] == "assistant" else "user"
         contents.append({"role": role, "parts": [{"text": m["content"]}]})
 
-    gen_cfg = {
-        "temperature": cfg.get("temperature", 0.2),
-        "maxOutputTokens": cfg.get("max_tokens", 8192),
-    }
-    if cfg.get("deep_reasoning", True) and any(m in model for m in ("2.5", "3", "flash", "pro")):
-        gen_cfg["thinkingConfig"] = {"thinkingBudget": 2048}
+    models_to_try = [requested_model]
+    for fb in ("gemini-3-flash-preview", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemma-4-31b-it"):
+        if fb not in models_to_try:
+            models_to_try.append(fb)
 
-    payload = {
-        "contents": contents,
-        "generationConfig": gen_cfg
-    }
-    if system_text:
-        payload["systemInstruction"] = {"parts": [{"text": system_text}]}
-
-    url = f"{base}/v1beta/models/{model}:streamGenerateContent?alt=sse&key={api_key}"
+    last_error = None
     headers = {"Content-Type": "application/json"}
 
-    try:
-        with httpx.Client(timeout=httpx.Timeout(300, connect=15)) as client:
-            r = client.post(url, json=payload, headers=headers)
-            if r.status_code == 400 and "thinkingConfig" in gen_cfg:
-                del gen_cfg["thinkingConfig"]
-                payload["generationConfig"] = gen_cfg
-                r = client.post(url, json=payload, headers=headers)
+    with httpx.Client(timeout=httpx.Timeout(120, connect=10)) as client:
+        for model in models_to_try:
+            gen_cfg = {
+                "temperature": cfg.get("temperature", 0.2),
+                "maxOutputTokens": cfg.get("max_tokens", 8192),
+            }
+            if cfg.get("deep_reasoning", True) and ("thinking" in model or "flash" in model):
+                gen_cfg["thinkingConfig"] = {"thinkingBudget": 2048}
 
-            if r.status_code >= 400:
-                body = r.read().decode("utf-8", errors="replace")[:500]
-                raise ProviderError(f"Gemini API returned {r.status_code}: {body}")
-            for line in r.iter_lines():
-                if not line or not line.startswith("data:"):
+            payload = {
+                "contents": contents,
+                "generationConfig": gen_cfg
+            }
+            if system_text:
+                payload["systemInstruction"] = {"parts": [{"text": system_text}]}
+
+            url = f"{base}/v1beta/models/{model}:streamGenerateContent?alt=sse&key={api_key}"
+
+            try:
+                r = client.post(url, json=payload, headers=headers)
+                if r.status_code == 400 and "thinkingConfig" in gen_cfg:
+                    del gen_cfg["thinkingConfig"]
+                    payload["generationConfig"] = gen_cfg
+                    r = client.post(url, json=payload, headers=headers)
+
+                if r.status_code in (404, 429, 503):
+                    body = r.read().decode("utf-8", errors="replace")[:300]
+                    last_error = ProviderError(f"Model {model} returned {r.status_code}: {body}")
                     continue
-                data_str = line[5:].strip()
-                if not data_str:
-                    continue
-                try:
-                    obj = json.loads(data_str)
-                    candidates = obj.get("candidates", [])
-                    if candidates:
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        for p in parts:
-                            if "text" in p:
-                                yield p["text"]
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-    except httpx.HTTPError as e:
-        raise ProviderError(f"Gemini request failed: {e}") from e
+
+                if r.status_code >= 400:
+                    body = r.read().decode("utf-8", errors="replace")[:500]
+                    raise ProviderError(f"Gemini API returned {r.status_code}: {body}")
+
+                streamed_any = False
+                for line in r.iter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data_str = line[5:].strip()
+                    if not data_str:
+                        continue
+                    try:
+                        obj = json.loads(data_str)
+                        candidates = obj.get("candidates", [])
+                        if candidates:
+                            parts = candidates[0].get("content", {}).get("parts", [])
+                            for p in parts:
+                                if "text" in p:
+                                    streamed_any = True
+                                    yield p["text"]
+                    except (json.JSONDecodeError, KeyError, IndexError):
+                        continue
+
+                if streamed_any:
+                    return
+            except httpx.HTTPError as e:
+                last_error = ProviderError(f"Gemini request failed for {model}: {e}")
+                continue
+
+    if last_error:
+        raise last_error
+    raise ProviderError("All Gemini models were unavailable or returned errors.")
 
 
 def complete(messages: list[dict], cfg: dict, max_tokens: int = 300) -> str:
@@ -206,7 +230,7 @@ def test_connection(cfg: dict) -> dict:
                 data = r.json()
                 models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])
                           if "generateContent" in m.get("supportedGenerationMethods", [])]
-                return {"ok": True, "models": models or ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]}
+                return {"ok": True, "models": models or ["gemini-3-flash-preview", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-flash-latest"]}
 
         from .embeddings import list_models
         models = list_models(cfg.get("base_url", ""), cfg.get("api_key", ""))
