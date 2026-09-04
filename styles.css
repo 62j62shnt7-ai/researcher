@@ -628,6 +628,99 @@ body {
   }
 }
 
+/* Streaming & Math Styles */
+.streaming-cursor {
+  display: inline-block;
+  width: 8px;
+  height: 16px;
+  background-color: var(--primary, #3b82f6);
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  animation: streamBlink 0.7s infinite alternate ease-in-out;
+}
+
+@keyframes streamBlink {
+  0% { opacity: 0.1; }
+  100% { opacity: 1; }
+}
+
+/* KaTeX Math Equations */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.5rem 0;
+  margin: 0.5rem 0;
+}
+
+.katex {
+  font-size: 1.05em;
+  color: #93c5fd;
+}
+
+/* Responsive Tables for Engineering Specs */
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+}
+
+.message-body table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  text-align: left;
+}
+
+.message-body th, .message-body td {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border-color);
+}
+
+.message-body th {
+  background-color: rgba(59, 130, 246, 0.12);
+  color: #93c5fd;
+  font-weight: 600;
+}
+
+.message-body tr:nth-child(even) {
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+/* Interactive Citations */
+.citation-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 6px;
+  background: rgba(59, 130, 246, 0.18);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  color: #60a5fa;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.15s ease;
+}
+
+.citation-pill:hover {
+  background: rgba(59, 130, 246, 0.35);
+  color: #fff;
+  border-color: #3b82f6;
+}
+
+.excerpt-card {
+  transition: all 0.3s ease;
+}
+
+.excerpt-card.highlighted {
+  border-color: #3b82f6 !important;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
+  transform: scale(1.01);
+}
+
 .hidden {
   display: none !important;
 }

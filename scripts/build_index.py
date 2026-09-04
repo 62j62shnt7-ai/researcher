@@ -84,7 +84,9 @@ def extract_text_pages(file_path):
         return []
 
 def tokenize(text):
-    return re.findall(r'\b\w+\b', text.lower())
+    if not text:
+        return []
+    return re.findall(r'[a-zA-Z0-9]+(?:[\.\-_:][a-zA-Z0-9]+)*', text.lower())
 
 def chunk_text(pages, filename, max_chars=800, overlap=100):
     chunks = []
@@ -241,6 +243,8 @@ def build_knowledge_base():
     kb_data = {
         "documents": documents_meta,
         "chunks": all_chunks,
+        "embedding_model": "BAAI/bge-small-en-v1.5" if (local_embedder and all_chunks and all_chunks[0].get("embedding")) else (working_embed_model or "none"),
+        "dimensions": len(all_chunks[0].get("embedding", [])) if (all_chunks and all_chunks[0].get("embedding")) else 0,
         "generated_at": str(Path("codes").stat().st_mtime) if codes_dir.exists() else ""
     }
 

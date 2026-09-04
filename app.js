@@ -9,13 +9,14 @@
   // Global State
   const state = {
     apiKey: localStorage.getItem('gemini_api_key') || '',
-    model: localStorage.getItem('gemini_model') || 'gemini-2.0-flash',
+    model: localStorage.getItem('gemini_model') || 'gemini-2.5-flash',
     discoveredModels: [],
     cloudUrl: localStorage.getItem('cloud_storage_url') || '',
 
-    repoKB: { documents: [], chunks: [] },
+    repoKB: { documents: [], chunks: [], embedding_model: '', dimensions: 0 },
     localDocs: [],
     localChunks: [],
+    chatHistory: [], // Multi-turn conversational memory
     activeFilter: 'all',
     db: null,
     fetchedDriveFiles: []
@@ -29,7 +30,7 @@
     elements.chatModelSelect = document.getElementById('chat-model-select');
     elements.modelSelect = document.getElementById('model-select');
     elements.embeddingEngineSelect = document.getElementById('embedding-engine-select');
-
+    elements.deepReasoningToggle = document.getElementById('deep-reasoning-toggle');
 
     elements.cloudUrlInput = document.getElementById('cloud-url-input');
 
@@ -103,6 +104,17 @@
       }
 
       const generateModels = models.filter(m => m.supportedGenerationMethods?.includes('generateContent'));
+      // Sort to prioritize latest models (2.5-flash, 2.5-pro, 2.0-flash)
+      generateModels.sort((a, b) => {
+        const getPriority = (name) => {
+          if (name.includes('2.5-flash')) return 1;
+          if (name.includes('2.5-pro')) return 2;
+          if (name.includes('2.0-flash')) return 3;
+          if (name.includes('1.5-flash')) return 4;
+          return 10;
+        };
+        return getPriority(a.name) - getPriority(b.name);
+      });
       const generateModelNames = generateModels.map(m => m.name.replace('models/', ''));
       state.discoveredModels = generateModelNames;
 
@@ -481,7 +493,9 @@
 
   // --- Tokenizer & BM25 Scoring ---
   function tokenize(text) {
-    return (text || '').toLowerCase().match(/\b\w+\b/g) || [];
+    if (!text) return [];
+    // Extract standard technical clauses and tokens, preserving dots, hyphens, and colons (e.g. 304.1.2, UG-27, ISO 9001:2015)
+    return text.toLowerCase().match(/[a-z0-9]+(?:[\.\-_:][a-z0-9]+)*/gi) || [];
   }
 
   function scoreBM25(queryTokens, chunkTokens) {
@@ -491,7 +505,9 @@
     let score = 0;
     queryTokens.forEach((qt) => {
       if (chunkTokenMap[qt]) {
-        score += chunkTokenMap[qt] * 1.5;
+        // Boost technical clause tokens with numbers, dots or dashes
+        const weight = qt.includes('.') || qt.includes('-') || qt.length > 5 ? 3.0 : 1.5;
+        score += chunkTokenMap[qt] * weight;
       }
     });
     return score;
@@ -569,17 +585,13 @@
   }
 
 
-  async function callGeminiChat(userPrompt, retrievedChunks, docScope = 'all') {
+  async function streamGeminiChat(userPrompt, retrievedChunks, docScope = 'all', onDelta = null) {
     if (!state.apiKey) {
       throw new Error('Please set your Gemini API key in Settings first.');
     }
 
-    const selectedModel = state.model || (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value);
-    if (!selectedModel) {
-      throw new Error('No Gemini model selected. Please open Settings to test connection and fetch models.');
-    }
-
-    const fallbackList = (state.discoveredModels && state.discoveredModels.length > 0) ? state.discoveredModels : [];
+    const selectedModel = state.model || (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value) || 'gemini-2.5-flash';
+    const fallbackList = (state.discoveredModels && state.discoveredModels.length > 0) ? state.discoveredModels : ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'];
     const modelsToTry = [selectedModel, ...fallbackList].filter((m, i, arr) => m && arr.indexOf(m) === i);
 
     let lastError = null;
@@ -596,45 +608,109 @@
 
     const systemInstruction = `You are Researcher AI, an expert engineering codes & standards assistant. ${scopeInstruction}
 If context excerpts are provided above, use them strictly to answer the user's question. 
-Always cite exact files, clauses (e.g. Para 304.1.2), and page numbers in brackets like [Source 1] or [File, Page X].
-If the context does not contain enough information, state what is known and clarify any limits.`;
+Always quote exact clause numbers (e.g. Para 304.1.2, UG-27), values, tolerances, and cite sources in brackets like [Source 1] or [File, Page X].
+Where equations are present, format them clearly in standard LaTeX math notation using $inline$ or $$display$$ syntax.
+If context is insufficient, state clearly what is specified in the codes and what is general engineering practice.`;
 
-    const contents = [
-      {
-        role: 'user',
-        parts: [
-          { text: contextText ? `${contextText}\n\nUSER QUESTION: ${userPrompt}` : userPrompt }
-        ]
-      }
-    ];
+    // Multi-turn conversation contents:
+    const contents = [];
+    const recentTurns = (state.chatHistory || []).slice(-8);
+    for (const turn of recentTurns) {
+      contents.push({
+        role: turn.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: turn.content }]
+      });
+    }
 
-    const body = {
-      contents,
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      generationConfig: { temperature: 0.2, maxOutputTokens: 2048 }
-    };
+    // Current user prompt with retrieved context
+    contents.push({
+      role: 'user',
+      parts: [
+        { text: contextText ? `${contextText}\n\nUSER QUESTION: ${userPrompt}` : userPrompt }
+      ]
+    });
+
+    const isDeepReasoning = elements.deepReasoningToggle ? elements.deepReasoningToggle.checked : true;
 
     for (const modelName of modelsToTry) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse`;
+
+      const generationConfig = {
+        temperature: 0.2,
+        maxOutputTokens: 8192
+      };
+
+      if (isDeepReasoning && (modelName.includes('2.5') || modelName.includes('3') || modelName.includes('flash') || modelName.includes('pro'))) {
+        generationConfig.thinkingConfig = {
+          thinkingBudget: 2048
+        };
+      }
+
+      const body = {
+        contents,
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        generationConfig
+      };
+
       try {
-        const res = await fetch(url, {
+        let res = await fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
           body: JSON.stringify(body)
         });
 
-        if (res.ok) {
-          const data = await res.json();
-          const candidate = data.candidates?.[0];
-          let answerText = candidate?.content?.parts?.map(p => p.text).join('') || 'No response generated.';
-          if (modelName !== selectedModel) {
-            answerText += `\n\n*(Note: Requested model \`${selectedModel}\` returned an error: ${lastError ? lastError.message : 'Unavailable'}. Response generated via fallback \`${modelName}\`)*`;
-          }
-          return { answer: answerText, modelUsed: modelName };
-        } else {
+        // If thinkingConfig causes 400 Bad Request on an unsupported model, retry without it
+        if (res.status === 400 && generationConfig.thinkingConfig) {
+          delete body.generationConfig.thinkingConfig;
+          res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
+            body: JSON.stringify(body)
+          });
+        }
+
+        if (!res.ok) {
           const errJson = await res.json().catch(() => ({}));
           lastError = new Error(errJson.error?.message || `HTTP ${res.status}`);
-          console.warn(`Model ${modelName} call failed:`, lastError);
+          console.warn(`Model ${modelName} stream call failed:`, lastError);
+          continue;
+        }
+
+        let fullText = '';
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // keep remainder
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              const jsonStr = line.slice(6).trim();
+              if (!jsonStr) continue;
+              try {
+                const data = JSON.parse(jsonStr);
+                const parts = data.candidates?.[0]?.content?.parts || [];
+                for (const part of parts) {
+                  if (part.text) {
+                    fullText += part.text;
+                    if (onDelta) onDelta(part.text, fullText);
+                  }
+                }
+              } catch (parseErr) {}
+            }
+          }
+        }
+
+        if (fullText) {
+          if (modelName !== selectedModel) {
+            fullText += `\n\n*(Note: Requested model \`${selectedModel}\` was unavailable; response generated via fallback \`${modelName}\`)*`;
+          }
+          return { answer: fullText, modelUsed: modelName };
         }
       } catch (e) {
         lastError = e;
@@ -646,7 +722,7 @@ If the context does not contain enough information, state what is known and clar
 
 
   // --- Hybrid Retriever (Filtered by Document Scope) ---
-  async function performHybridSearch(query, topK = 5, docScope = 'all') {
+  async function performHybridSearch(query, topK = 6, docScope = 'all') {
     const qTokens = tokenize(query);
     const queryVec = await fetchQueryEmbedding(query);
 
@@ -662,13 +738,20 @@ If the context does not contain enough information, state what is known and clar
       allChunks = allChunks.filter(c => c.file === docScope || c.docId === docScope);
     }
 
+    // Check dimension compatibility to avoid silent 0-score bug
+    const sampleChunk = allChunks.find(c => c.embedding && Array.isArray(c.embedding) && c.embedding.length > 0);
+    const hasDimMismatch = (queryVec && sampleChunk && queryVec.length !== sampleChunk.embedding.length);
+    if (hasDimMismatch) {
+      console.warn(`Vector dimension mismatch: query vector is ${queryVec.length}-dim, but chunks are ${sampleChunk.embedding.length}-dim. Emphasizing BM25 clause matching.`);
+    }
+
     const scored = allChunks.map((chunk) => {
       const bm25 = scoreBM25(qTokens, chunk.tokens || tokenize(chunk.text));
       let vecScore = 0;
-      if (queryVec && chunk.embedding) {
+      if (!hasDimMismatch && queryVec && chunk.embedding && queryVec.length === chunk.embedding.length) {
         vecScore = cosineSimilarity(queryVec, chunk.embedding);
       }
-      const finalScore = queryVec && chunk.embedding ? (0.3 * bm25 + 0.7 * vecScore) : bm25;
+      const finalScore = (!hasDimMismatch && queryVec && chunk.embedding) ? (0.35 * bm25 + 0.65 * vecScore) : bm25;
       return { chunk, score: finalScore, bm25, vecScore };
     });
 
@@ -749,19 +832,74 @@ If the context does not contain enough information, state what is known and clar
     }
 
     const totalChunks = chunks.length;
-    for (let idx = 0; idx < totalChunks; idx++) {
-      const chunk = chunks[idx];
-      const percent = Math.round(((idx + 1) / totalChunks) * 100);
-      if (progressStatusMsg) {
-        progressStatusMsg.textContent = `⚡ Computing vector embeddings: ${idx + 1} of ${totalChunks} chunks (${filename})`;
-      }
-      if (progressPercent) progressPercent.textContent = `${percent}%`;
-      if (progressBarFill) progressBarFill.style.width = `${percent}%`;
+    if (totalChunks > 0) {
+      // Batch embedding strategy: batchEmbedContents for Gemini API (up to 16 chunks per request)
+      if (state.apiKey) {
+        const batchSize = 16;
+        const embedModel = 'text-embedding-004';
+        const batchUrl = `https://generativelanguage.googleapis.com/v1beta/models/${embedModel}:batchEmbedContents`;
 
-      try {
-        chunk.embedding = await fetchQueryEmbedding(chunk.text);
-      } catch (e) {
-        console.warn(`Vector embedding failed for chunk ${chunk.id}:`, e);
+        for (let i = 0; i < totalChunks; i += batchSize) {
+          const slice = chunks.slice(i, i + batchSize);
+          const currentCount = Math.min(i + batchSize, totalChunks);
+          const percent = Math.round((currentCount / totalChunks) * 100);
+
+          if (progressStatusMsg) {
+            progressStatusMsg.textContent = `⚡ Computing Gemini batch embeddings: ${currentCount}/${totalChunks} chunks (${filename})`;
+          }
+          if (progressPercent) progressPercent.textContent = `${percent}%`;
+          if (progressBarFill) progressBarFill.style.width = `${percent}%`;
+
+          const requests = slice.map(c => ({
+            model: `models/${embedModel}`,
+            content: { parts: [{ text: c.text.substring(0, 8000) }] }
+          }));
+
+          let batchSuccess = false;
+          try {
+            const res = await fetch(batchUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
+              body: JSON.stringify({ requests })
+            });
+
+            if (res.ok) {
+              const data = await res.json();
+              const embeddings = data.embeddings || [];
+              embeddings.forEach((emb, idx) => {
+                if (emb.values && slice[idx]) {
+                  slice[idx].embedding = emb.values;
+                }
+              });
+              batchSuccess = true;
+            }
+          } catch (e) {
+            console.warn('Batch embedding error, falling back to sequential:', e);
+          }
+
+          if (!batchSuccess) {
+            for (const chunk of slice) {
+              try {
+                chunk.embedding = await fetchQueryEmbedding(chunk.text);
+              } catch (err) {}
+            }
+          }
+        }
+      } else {
+        // Local browser embedder fallback
+        for (let idx = 0; idx < totalChunks; idx++) {
+          const chunk = chunks[idx];
+          const percent = Math.round(((idx + 1) / totalChunks) * 100);
+          if (progressStatusMsg) {
+            progressStatusMsg.textContent = `⚡ Computing local embeddings: ${idx + 1}/${totalChunks} chunks (${filename})`;
+          }
+          if (progressPercent) progressPercent.textContent = `${percent}%`;
+          if (progressBarFill) progressBarFill.style.width = `${percent}%`;
+
+          try {
+            chunk.embedding = await fetchQueryEmbedding(chunk.text);
+          } catch (e) {}
+        }
       }
     }
 
@@ -922,6 +1060,48 @@ If the context does not contain enough information, state what is known and clar
 
   }
 
+  function renderFormattedContent(container, markdownText) {
+    if (!container) return;
+    if (window.marked) {
+      // Process citations into interactive badges
+      let processed = (markdownText || '').replace(/\[(?:Source\s*)?(\d+)\]/gi, (match, num) => {
+        return `<a class="citation-pill" data-source-index="${num}" href="javascript:void(0);">📚 [Source ${num}]</a>`;
+      });
+
+      let html = marked.parse(processed);
+      container.innerHTML = html;
+
+      // Wrap tables for responsive horizontal scrolling on mobile
+      container.querySelectorAll('table').forEach(tbl => {
+        if (!tbl.parentElement.classList.contains('table-responsive')) {
+          const wrapper = document.createElement('div');
+          wrapper.className = 'table-responsive';
+          tbl.parentNode.insertBefore(wrapper, tbl);
+          wrapper.appendChild(tbl);
+        }
+      });
+
+      // Render math formulas with KaTeX
+      if (window.renderMathInElement) {
+        try {
+          renderMathInElement(container, {
+            delimiters: [
+              { left: '$$', right: '$$', display: true },
+              { left: '$', right: '$', display: false },
+              { left: '\\(', right: '\\)', display: false },
+              { left: '\\[', right: '\\]', display: true }
+            ],
+            throwOnError: false
+          });
+        } catch (e) {
+          console.warn('KaTeX math rendering warning:', e);
+        }
+      }
+    } else {
+      container.textContent = markdownText;
+    }
+  }
+
   function renderMessage(role, text, citations = [], modelBadge = '') {
     const msgDiv = document.createElement('div');
     msgDiv.className = `message ${role === 'user' ? 'user-message' : 'system-message'}`;
@@ -933,8 +1113,8 @@ If the context does not contain enough information, state what is known and clar
     const body = document.createElement('div');
     body.className = 'message-body';
 
-    if (window.marked && role === 'assistant') {
-      body.innerHTML = marked.parse(text);
+    if (role === 'assistant') {
+      renderFormattedContent(body, text);
     } else {
       body.textContent = text;
     }
@@ -946,9 +1126,9 @@ If the context does not contain enough information, state what is known and clar
         <div class="citations-header">📚 Source Excerpts (${citations.length})</div>
         <div class="citations-list">
           ${citations.map((c, i) => `
-            <div class="excerpt-card">
+            <div class="excerpt-card" id="source-card-${i + 1}" data-index="${i + 1}">
               <div class="excerpt-title">[${i + 1}] ${c.file} — ${c.clause} (Page ${c.page})</div>
-              <div class="excerpt-text">"${c.text.substring(0, 220)}..."</div>
+              <div class="excerpt-text">"${c.text.substring(0, 240)}..."</div>
             </div>
           `).join('')}
         </div>
@@ -963,12 +1143,117 @@ If the context does not contain enough information, state what is known and clar
       body.appendChild(badgeDiv);
     }
 
+    // Attach citation pill click handler to highlight excerpt card
+    body.addEventListener('click', (e) => {
+      const pill = e.target.closest('.citation-pill');
+      if (pill) {
+        const idx = pill.getAttribute('data-source-index');
+        const target = body.querySelector(`#source-card-${idx}`);
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          target.classList.add('highlighted');
+          setTimeout(() => target.classList.remove('highlighted'), 2000);
+        }
+      }
+    });
+
     msgDiv.appendChild(avatar);
     msgDiv.appendChild(body);
     if (elements.chatMessages) {
       elements.chatMessages.appendChild(msgDiv);
       elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
     }
+  }
+
+  function createStreamingMessage(citations = [], initialModel = '') {
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'message system-message streaming-active';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'message-avatar';
+    avatar.textContent = '⚡';
+
+    const body = document.createElement('div');
+    body.className = 'message-body';
+
+    const textContainer = document.createElement('div');
+    textContainer.className = 'streaming-text-container';
+    body.appendChild(textContainer);
+
+    const cursor = document.createElement('span');
+    cursor.className = 'streaming-cursor';
+    body.appendChild(cursor);
+
+    let citationsWrapper = null;
+    if (citations && citations.length > 0) {
+      citationsWrapper = document.createElement('div');
+      citationsWrapper.className = 'citations-wrapper';
+      citationsWrapper.innerHTML = `
+        <div class="citations-header">📚 Source Excerpts (${citations.length})</div>
+        <div class="citations-list">
+          ${citations.map((c, i) => `
+            <div class="excerpt-card" id="source-card-${i + 1}" data-index="${i + 1}">
+              <div class="excerpt-title">[${i + 1}] ${c.file} — ${c.clause} (Page ${c.page})</div>
+              <div class="excerpt-text">"${c.text.substring(0, 240)}..."</div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+      body.appendChild(citationsWrapper);
+    }
+
+    const badgeDiv = document.createElement('div');
+    badgeDiv.style.cssText = 'font-size: 11px; color: #64748b; margin-top: 6px; font-family: monospace; display: flex; align-items: center; gap: 4px; border-top: 1px solid #334155; padding-top: 4px;';
+    badgeDiv.innerHTML = `⚡ Engine Model: <strong style="color:#3b82f6;">${initialModel || state.model}</strong>`;
+    body.appendChild(badgeDiv);
+
+    body.addEventListener('click', (e) => {
+      const pill = e.target.closest('.citation-pill');
+      if (pill) {
+        const idx = pill.getAttribute('data-source-index');
+        const target = body.querySelector(`#source-card-${idx}`);
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          target.classList.add('highlighted');
+          setTimeout(() => target.classList.remove('highlighted'), 2000);
+        }
+      }
+    });
+
+    msgDiv.appendChild(avatar);
+    msgDiv.appendChild(body);
+    if (elements.chatMessages) {
+      elements.chatMessages.appendChild(msgDiv);
+      elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+    }
+
+    let accumulated = '';
+    let lastRenderTime = 0;
+
+    return {
+      update: (chunk, fullText) => {
+        accumulated = fullText;
+        const now = Date.now();
+        // Throttle full markdown/KaTeX parsing during rapid streaming tokens for smooth 60fps UI
+        if (now - lastRenderTime > 80) {
+          renderFormattedContent(textContainer, accumulated);
+          lastRenderTime = now;
+          if (elements.chatMessages) elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+        }
+      },
+      finish: (modelBadge) => {
+        cursor.remove();
+        msgDiv.classList.remove('streaming-active');
+        renderFormattedContent(textContainer, accumulated);
+        if (modelBadge) {
+          badgeDiv.innerHTML = `⚡ Engine Model: <strong style="color:#3b82f6;">${modelBadge}</strong>`;
+        }
+        if (elements.chatMessages) elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
+      },
+      remove: () => {
+        msgDiv.remove();
+      }
+    };
   }
 
   function showThinkingIndicator(initialStatus = 'Searching engineering library...') {
@@ -1307,6 +1592,7 @@ If the context does not contain enough information, state what is known and clar
 
     if (elements.btnClearChat) {
       elements.btnClearChat.addEventListener('click', () => {
+        state.chatHistory = [];
         if (elements.chatMessages) {
           elements.chatMessages.innerHTML = '';
           renderMessage('assistant', '⚡ **New Chat Session Started.** Ask any engineering question or select a specific code from the dropdown below.');
@@ -1340,22 +1626,33 @@ If the context does not contain enough information, state what is known and clar
 
         const thinking = showThinkingIndicator(useRag ? '🔍 Searching engineering library & matching clauses...' : '⚡ Connecting to Gemini AI...');
 
+        let streamer = null;
         try {
           if (useRag) {
-            retrieved = await performHybridSearch(prompt, 5, docScope);
-            thinking.update(`🧠 Reasoning with ${state.model || 'Gemini'}... (${retrieved.length} source clauses retrieved)`);
+            retrieved = await performHybridSearch(prompt, 6, docScope);
+            thinking.update(`🧠 Synthesizing with ${state.model || 'Gemini'}... (${retrieved.length} clauses retrieved)`);
           } else {
-            thinking.update(`🧠 Reasoning with ${state.model || 'Gemini'}...`);
+            thinking.update(`🧠 Synthesizing with ${state.model || 'Gemini'}...`);
           }
 
-          const res = await callGeminiChat(prompt, retrieved, docScope);
           thinking.remove();
+          streamer = createStreamingMessage(retrieved, state.model);
 
-          const text = typeof res === 'object' ? res.answer : res;
-          const modelBadge = typeof res === 'object' ? res.modelUsed : '';
-          renderMessage('assistant', text, retrieved, modelBadge);
+          const res = await streamGeminiChat(prompt, retrieved, docScope, (delta, full) => {
+            if (streamer) streamer.update(delta, full);
+          });
+
+          streamer.finish(res.modelUsed);
+
+          // Retain conversational memory
+          state.chatHistory.push({ role: 'user', content: prompt });
+          state.chatHistory.push({ role: 'assistant', content: res.answer });
+          if (state.chatHistory.length > 16) {
+            state.chatHistory = state.chatHistory.slice(-16);
+          }
         } catch (err) {
           thinking.remove();
+          if (streamer) streamer.remove();
           renderMessage('assistant', `⚠️ **Error**: ${err.message}`);
         }
       });

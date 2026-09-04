@@ -16,8 +16,8 @@ DEFAULTS = {
         "api_key": "",
         "model": "",
         "temperature": 0.2,
-        "max_tokens": 3000,
-        "context_tokens": 8192,   # set to match the context length loaded in LM Studio
+        "max_tokens": 8192,
+        "context_tokens": 32768,   # ample room for modern large-context LLMs
     },
     "embeddings": {
         "enabled": True,
