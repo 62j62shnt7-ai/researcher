@@ -575,9 +575,12 @@ async function streamChatResponse(userPrompt) {
     augmentedPrompt = contextStr;
   }
 
-  // Prepare Gemini Request
-  const modelName = settings.model || 'gemini-3-flash-preview';
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${settings.apiKey}`;
+  // Prepare Gemini Request with Candidate Fallbacks & Rate-Limit Retry
+  const requestedModel = settings.model || 'gemini-3-flash-preview';
+  const candidateModels = [requestedModel];
+  for (const m of ['gemini-3-flash-preview', 'gemini-3.7-flash', 'gemini-2.0-flash']) {
+    if (!candidateModels.includes(m)) candidateModels.push(m);
+  }
 
   // History payload
   const contents = [];
@@ -611,25 +614,66 @@ async function streamChatResponse(userPrompt) {
   isBusy = true;
   $('sendBtn').disabled = true;
   $('sendBtn').textContent = '⏹';
-  $('tpsWrap').textContent = 'streaming…';
+  $('tpsWrap').textContent = 'connecting…';
   const startTime = performance.now();
   let totalTokens = 0;
   let fullResponseText = '';
+  let activeModelUsed = requestedModel;
 
   abortController = new AbortController();
 
   try {
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: abortController.signal
-    });
+    let resp = null;
+    let lastErrorMsg = '';
 
-    if (!resp.ok) {
-      const errJson = await resp.json().catch(() => ({}));
-      const msg = errJson.error?.message || `HTTP ${resp.status} ${resp.statusText}`;
-      throw new Error(msg);
+    for (const modelName of candidateModels) {
+      activeModelUsed = modelName;
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${settings.apiKey}`;
+
+      let attempt = 0;
+      while (attempt < 2) {
+        attempt++;
+        try {
+          resp = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: abortController.signal
+          });
+
+          if (resp.ok) {
+            break;
+          }
+
+          const errJson = await resp.json().catch(() => ({}));
+          const msg = errJson.error?.message || `HTTP ${resp.status} ${resp.statusText}`;
+          lastErrorMsg = msg;
+
+          // Check if rate limited and told to wait
+          if (resp.status === 429 || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('rate')) {
+            const retryMatch = msg.match(/retry in\s*(\d+(?:\.\d+)?)\s*ms/i);
+            const waitMs = retryMatch ? parseFloat(retryMatch[1]) : 0;
+            if (attempt === 1 && waitMs > 0 && waitMs <= 2500) {
+              $('tpsWrap').textContent = `retrying in ${(waitMs/1000).toFixed(1)}s…`;
+              await new Promise(r => setTimeout(r, waitMs + 100));
+              continue;
+            }
+          }
+          break; // move to next candidate model
+        } catch (fetchErr) {
+          if (fetchErr.name === 'AbortError') throw fetchErr;
+          lastErrorMsg = fetchErr.message;
+          break;
+        }
+      }
+
+      if (resp && resp.ok) {
+        break; // Successfully connected to a model
+      }
+    }
+
+    if (!resp || !resp.ok) {
+      throw new Error(lastErrorMsg || 'Failed to connect to Gemini after trying fallback models.');
     }
 
     const reader = resp.body.getReader();
@@ -678,6 +722,10 @@ async function streamChatResponse(userPrompt) {
     }
 
     // Finalize response
+    if (activeModelUsed !== requestedModel && fullResponseText) {
+      fullResponseText = `> [!NOTE]\n> *Free tier quota reached for \`${requestedModel}\`. Automatically answered using \`${activeModelUsed}\`.*\n\n` + fullResponseText;
+    }
+
     if (!fullResponseText) {
       fullResponseText = 'No text returned by the model.';
       assistantBody.innerHTML = fullResponseText;

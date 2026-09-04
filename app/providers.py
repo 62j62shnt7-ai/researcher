@@ -126,7 +126,7 @@ def _stream_gemini(messages: list[dict], cfg: dict):
         contents.append({"role": role, "parts": [{"text": m["content"]}]})
 
     models_to_try = [requested_model]
-    for fb in ("gemini-3-flash-preview", "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemma-4-31b-it"):
+    for fb in ("gemini-3-flash-preview", "gemini-3.7-flash", "gemini-2.0-flash", "gemini-3.8-flash", "gemini-flash-latest"):
         if fb not in models_to_try:
             models_to_try.append(fb)
 
@@ -159,9 +159,21 @@ def _stream_gemini(messages: list[dict], cfg: dict):
                     r = client.post(url, json=payload, headers=headers)
 
                 if r.status_code in (404, 429, 503):
-                    body = r.read().decode("utf-8", errors="replace")[:300]
-                    last_error = ProviderError(f"Model {model} returned {r.status_code}: {body}")
-                    continue
+                    body = r.read().decode("utf-8", errors="replace")[:400]
+                    # If told to retry in X ms and it's short, wait and retry once
+                    import re, time
+                    retry_match = re.search(r"retry in\s*(\d+(?:\.\d+)?)\s*ms", body, re.I)
+                    if retry_match and float(retry_match.group(1)) <= 2500:
+                        time.sleep((float(retry_match.group(1)) + 100) / 1000.0)
+                        r = client.post(url, json=payload, headers=headers)
+                        if r.status_code < 400:
+                            pass # stream successfully below
+                        else:
+                            last_error = ProviderError(f"Model {model} returned {r.status_code}: {body}")
+                            continue
+                    else:
+                        last_error = ProviderError(f"Model {model} returned {r.status_code}: {body}")
+                        continue
 
                 if r.status_code >= 400:
                     body = r.read().decode("utf-8", errors="replace")[:500]
