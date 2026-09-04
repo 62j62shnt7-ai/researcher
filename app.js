@@ -599,21 +599,31 @@
 
     let lastError = null;
 
-    let contextText = '';
+    let srcText = '';
     if (retrievedChunks && retrievedChunks.length > 0) {
-      contextText = 'ENGINEERING CODE & STANDARD EXCERPTS (Ground your answer strictly on these excerpts):\n\n' +
-        retrievedChunks.map((c, i) =>
-          `[Source ${i + 1}]: Document: "${c.file}", Clause/Section: "${c.clause}", Page: ${c.page}\nExcerpt:\n${c.text}`
-        ).join('\n\n---\n\n');
+      srcText = retrievedChunks.map((c, i) => {
+        const loc = c.page ? `Page ${c.page}${c.clause ? ', ' + c.clause : ''}` : (c.clause || '');
+        return `[${i + 1}] (${c.file}${loc ? ', ' + loc : ''})\n${c.text}`;
+      }).join('\n\n---\n\n');
+    } else {
+      srcText = '(no matching excerpts found in the library)';
     }
 
-    const scopeInstruction = docScope !== 'all' ? `You are specifically answering questions regarding the engineering code: "${docScope}". Answer strictly based on this document.` : 'You are answering based on the provided engineering codes and standards.';
+    const scopeNote = (docScope && docScope !== 'all') ? `\n\nFocus specifically on the document: "${docScope}".` : '';
 
-    const systemInstruction = `You are Researcher AI, an expert engineering codes & standards assistant. ${scopeInstruction}
-Answer the user's question directly, clearly, and logically using the provided code excerpts.
-Explain requirements practically: what they mean, conditions, tolerances, and design limits.
-Always cite the exact clause numbers (e.g. Para 304.1.2, Clause 6.2, UG-27), formulas, and source brackets like [Source 1].
-Never output internal thinking or raw prompt instructions. If context is insufficient, state clearly what is in the document and what is general engineering knowledge.`;
+    const systemInstruction = `You are an expert engineering assistant with deep knowledge of codes, standards, and engineering practice. You answer questions using excerpts retrieved from the user's document library, shown in SOURCES below.${scopeNote}
+
+How to answer:
+1. Start with a direct answer to the question.
+2. Then EXPLAIN it properly: what it means in practice, why the requirement exists where evident, what conditions/exceptions apply, and how the pieces relate. Do not just quote fragments back — interpret and synthesize them like a senior engineer explaining to a colleague.
+3. Combine information across multiple sources when they cover the same topic; point out when sources differ or when a requirement in one place is modified by another.
+4. Quote exact clause numbers, values, formulas, tolerances, and table data when present. Never invent clause numbers or values.
+5. Cite sources inline with bracketed numbers, e.g. [1] or [2][3], so the user can verify.
+6. If the sources only partially answer the question, answer what you can from them, then clearly separate any additional general engineering knowledge with "(general knowledge, not from your documents)". If the sources contain nothing relevant, say so plainly.
+7. Use markdown (headings, tables, lists) when it makes the answer clearer.
+
+SOURCES:
+${srcText}`;
 
     // Multi-turn conversation contents:
     const contents = [];
@@ -625,12 +635,10 @@ Never output internal thinking or raw prompt instructions. If context is insuffi
       });
     }
 
-    // Current user prompt with retrieved context
+    // Current user prompt
     contents.push({
       role: 'user',
-      parts: [
-        { text: contextText ? `${contextText}\n\nUSER QUESTION: ${userPrompt}` : userPrompt }
-      ]
+      parts: [{ text: userPrompt }]
     });
 
     const isDeepReasoning = elements.deepReasoningToggle ? elements.deepReasoningToggle.checked : true;
@@ -721,10 +729,49 @@ Never output internal thinking or raw prompt instructions. If context is insuffi
   }
 
 
-  // --- Hybrid Retriever (Filtered by Document Scope) ---
-  async function performHybridSearch(query, topK = 6, docScope = 'all') {
+  // --- Continuous Context Neighbor Expansion (matching offline app rag.py) ---
+  function expandChunkWithNeighbors(chunk, allChunks, maxChars = 3500) {
+    if (!chunk || !chunk.text) return '';
+    let text = chunk.text;
+    if (text.length >= maxChars) return text.substring(0, maxChars);
+
+    const chunkFile = chunk.file || '';
+    const m = String(chunk.id || '').match(/^(.*?)_(\d+)$/);
+    const idx = m ? parseInt(m[2], 10) : (chunk.chunkIndex != null ? chunk.chunkIndex : null);
+    const prefix = m ? m[1] : chunkFile;
+
+    if (idx !== null) {
+      const budget = maxChars - text.length;
+      if (budget > 300) {
+        const nextChunk = allChunks.find(c =>
+          c.id === `${prefix}_${idx + 1}` ||
+          (c.file === chunkFile && c.chunkIndex === idx + 1)
+        );
+        const prevChunk = allChunks.find(c =>
+          c.id === `${prefix}_${idx - 1}` ||
+          (c.file === chunkFile && c.chunkIndex === idx - 1)
+        );
+        const halfBudget = Math.floor(budget / 2);
+        if (nextChunk && nextChunk.text) {
+          text = text + "\n\n" + nextChunk.text.substring(0, halfBudget);
+        }
+        if (prevChunk && prevChunk.text) {
+          text = prevChunk.text.slice(-halfBudget) + "\n\n" + text;
+        }
+      }
+    }
+    return text.substring(0, maxChars);
+  }
+
+  // --- Hybrid Retriever (RRF fused BM25 + Vector Search with Neighbor Expansion) ---
+  async function performHybridSearch(query, topK = 8, docScope = 'all') {
     const qTokens = tokenize(query);
-    const queryVec = await fetchQueryEmbedding(query);
+    let queryVec = null;
+    try {
+      queryVec = await fetchQueryEmbedding(query);
+    } catch (e) {
+      queryVec = null;
+    }
 
     let allChunks = [];
     if (state.activeFilter === 'all' || state.activeFilter === 'repo') {
@@ -738,30 +785,68 @@ Never output internal thinking or raw prompt instructions. If context is insuffi
       allChunks = allChunks.filter(c => c.file === docScope || c.docId === docScope);
     }
 
+    if (allChunks.length === 0) return [];
+
     // Check dimension compatibility to avoid silent 0-score bug
     const sampleChunk = allChunks.find(c => c.embedding && Array.isArray(c.embedding) && c.embedding.length > 0);
     const hasDimMismatch = (queryVec && sampleChunk && queryVec.length !== sampleChunk.embedding.length);
-    if (hasDimMismatch) {
-      console.warn(`Vector dimension mismatch: query vector is ${queryVec.length}-dim, but chunks are ${sampleChunk.embedding.length}-dim. Emphasizing BM25 clause matching.`);
+
+    // 1. BM25 keyword rankings
+    const bm25List = allChunks.map(chunk => ({
+      chunk,
+      score: scoreBM25(qTokens, chunk.tokens || tokenize(chunk.text))
+    })).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+
+    // 2. Vector semantic rankings
+    let vecList = [];
+    if (queryVec && !hasDimMismatch) {
+      vecList = allChunks.map(chunk => {
+        let vecScore = 0;
+        if (chunk.embedding && queryVec.length === chunk.embedding.length) {
+          vecScore = cosineSimilarity(queryVec, chunk.embedding);
+        }
+        return { chunk, score: vecScore };
+      }).filter(x => x.score > 0.3).sort((a, b) => b.score - a.score);
     }
 
-    const scored = allChunks.map((chunk) => {
-      const bm25 = scoreBM25(qTokens, chunk.tokens || tokenize(chunk.text));
-      let vecScore = 0;
-      if (!hasDimMismatch && queryVec && chunk.embedding && queryVec.length === chunk.embedding.length) {
-        vecScore = cosineSimilarity(queryVec, chunk.embedding);
-      }
-      const finalScore = (!hasDimMismatch && queryVec && chunk.embedding) ? (0.35 * bm25 + 0.65 * vecScore) : bm25;
-      return { chunk, score: finalScore, bm25, vecScore };
+    // 3. Reciprocal Rank Fusion (RRF) matching offline store.py (vector_weight = 0.6)
+    const K = 60.0;
+    const vectorWeight = 0.6;
+    const fusedScores = new Map();
+    const chunkMap = new Map();
+
+    bm25List.slice(0, 40).forEach((item, rank) => {
+      const cid = item.chunk.id || `${item.chunk.file}_${item.chunk.page}_${rank}`;
+      chunkMap.set(cid, item.chunk);
+      fusedScores.set(cid, (fusedScores.get(cid) || 0) + (1 - vectorWeight) / (K + rank + 1));
     });
 
-    scored.sort((a, b) => b.score - a.score);
-    let topHits = scored.slice(0, topK).filter(s => s.score > 0.05).map(s => ({ ...s.chunk, score: s.score }));
-    // Fallback: if no keyword match was found (e.g. broad question like 'summarize' or 'what is this code about'),
-    // always return the leading chunks of the document so the AI is never starved of context
+    vecList.slice(0, 40).forEach((item, rank) => {
+      const cid = item.chunk.id || `${item.chunk.file}_${item.chunk.page}_${rank}`;
+      chunkMap.set(cid, item.chunk);
+      fusedScores.set(cid, (fusedScores.get(cid) || 0) + vectorWeight / (K + rank + 1));
+    });
+
+    let rankedEntries = Array.from(fusedScores.entries()).sort((a, b) => b[1] - a[1]).slice(0, topK);
+
+    let topHits = rankedEntries.map(([cid, score]) => {
+      const chunk = chunkMap.get(cid);
+      return {
+        ...chunk,
+        text: expandChunkWithNeighbors(chunk, allChunks, 3500),
+        score
+      };
+    });
+
+    // Fallback: if broad question yields no specific keyword hits, return leading chunks (scope, table of contents, introduction)
     if (topHits.length === 0 && allChunks.length > 0) {
-      topHits = allChunks.slice(0, Math.min(topK, 6)).map(c => ({ ...c, score: 0.1 }));
+      topHits = allChunks.slice(0, Math.min(topK, 8)).map((c) => ({
+        ...c,
+        text: expandChunkWithNeighbors(c, allChunks, 3500),
+        score: 0.1
+      }));
     }
+
     return topHits;
   }
 
@@ -992,12 +1077,46 @@ Never output internal thinking or raw prompt instructions. If context is insuffi
 
   }
 
+  function escapeHtml(str) {
+    if (!str) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  function buildExcerptsDrawerHtml(citations) {
+    if (!citations || !citations.length) return '';
+    return `
+      <details class="sources-drawer" open>
+        <summary class="sources-summary">📄 ${citations.length} Source Excerpt${citations.length > 1 ? 's' : ''} (click to collapse)</summary>
+        <div class="citations-list">
+          ${citations.map((c, i) => {
+            const loc = c.page ? `Page ${c.page}${c.clause ? ', ' + escapeHtml(c.clause) : ''}` : escapeHtml(c.clause || '');
+            const head = `[${i + 1}] ${escapeHtml(c.file)}${loc ? ' — ' + loc : ''}`;
+            return `
+              <div class="excerpt-card" id="source-card-${i + 1}" data-index="${i + 1}">
+                <div class="excerpt-header">
+                  <span class="excerpt-title">${head}</span>
+                  <button type="button" class="btn-copy-excerpt" title="Copy excerpt to clipboard">📋 Copy</button>
+                </div>
+                <div class="excerpt-text">${escapeHtml(c.text)}</div>
+              </div>
+            `;
+          }).join('')}
+        </div>
+      </details>
+    `;
+  }
+
   function renderFormattedContent(container, markdownText) {
     if (!container) return;
     if (window.marked) {
       // Process citations into interactive badges
-      let processed = (markdownText || '').replace(/\[(?:Source\s*)?(\d+)\]/gi, (match, num) => {
-        return `<a class="citation-pill" data-source-index="${num}" href="javascript:void(0);">📚 [Source ${num}]</a>`;
+      let processed = (markdownText || '').replace(/\[(?:Source\s*)?(\d{1,2})\]/gi, (match, num) => {
+        return `<a class="citation-pill" data-source-index="${num}" href="javascript:void(0);" title="Jump to Source [${num}]">[${num}]</a>`;
       });
 
       let html = marked.parse(processed);
@@ -1054,17 +1173,7 @@ Never output internal thinking or raw prompt instructions. If context is insuffi
     if (citations && citations.length > 0) {
       const citationsWrapper = document.createElement('div');
       citationsWrapper.className = 'citations-wrapper';
-      citationsWrapper.innerHTML = `
-        <div class="citations-header">📚 Source Excerpts (${citations.length})</div>
-        <div class="citations-list">
-          ${citations.map((c, i) => `
-            <div class="excerpt-card" id="source-card-${i + 1}" data-index="${i + 1}">
-              <div class="excerpt-title">[${i + 1}] ${c.file} — ${c.clause} (Page ${c.page})</div>
-              <div class="excerpt-text">"${c.text.substring(0, 240)}..."</div>
-            </div>
-          `).join('')}
-        </div>
-      `;
+      citationsWrapper.innerHTML = buildExcerptsDrawerHtml(citations);
       body.appendChild(citationsWrapper);
     }
 
@@ -1075,16 +1184,28 @@ Never output internal thinking or raw prompt instructions. If context is insuffi
       body.appendChild(badgeDiv);
     }
 
-    // Attach citation pill click handler to highlight excerpt card
+    // Attach citation pill and copy handlers
     body.addEventListener('click', (e) => {
       const pill = e.target.closest('.citation-pill');
       if (pill) {
         const idx = pill.getAttribute('data-source-index');
+        const drawer = body.querySelector('.sources-drawer');
+        if (drawer) drawer.open = true;
         const target = body.querySelector(`#source-card-${idx}`);
         if (target) {
           target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
           target.classList.add('highlighted');
-          setTimeout(() => target.classList.remove('highlighted'), 2000);
+          setTimeout(() => target.classList.remove('highlighted'), 2500);
+        }
+      }
+      const copyBtn = e.target.closest('.btn-copy-excerpt');
+      if (copyBtn) {
+        const card = copyBtn.closest('.excerpt-card');
+        const txt = card ? card.querySelector('.excerpt-text')?.innerText : '';
+        if (txt) {
+          navigator.clipboard.writeText(txt);
+          copyBtn.textContent = '✔️ Copied!';
+          setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 2000);
         }
       }
     });
@@ -1120,17 +1241,7 @@ Never output internal thinking or raw prompt instructions. If context is insuffi
     if (citations && citations.length > 0) {
       citationsWrapper = document.createElement('div');
       citationsWrapper.className = 'citations-wrapper';
-      citationsWrapper.innerHTML = `
-        <div class="citations-header">📚 Source Excerpts (${citations.length})</div>
-        <div class="citations-list">
-          ${citations.map((c, i) => `
-            <div class="excerpt-card" id="source-card-${i + 1}" data-index="${i + 1}">
-              <div class="excerpt-title">[${i + 1}] ${c.file} — ${c.clause} (Page ${c.page})</div>
-              <div class="excerpt-text">"${c.text.substring(0, 240)}..."</div>
-            </div>
-          `).join('')}
-        </div>
-      `;
+      citationsWrapper.innerHTML = buildExcerptsDrawerHtml(citations);
       body.appendChild(citationsWrapper);
     }
 
@@ -1143,11 +1254,23 @@ Never output internal thinking or raw prompt instructions. If context is insuffi
       const pill = e.target.closest('.citation-pill');
       if (pill) {
         const idx = pill.getAttribute('data-source-index');
+        const drawer = body.querySelector('.sources-drawer');
+        if (drawer) drawer.open = true;
         const target = body.querySelector(`#source-card-${idx}`);
         if (target) {
           target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
           target.classList.add('highlighted');
-          setTimeout(() => target.classList.remove('highlighted'), 2000);
+          setTimeout(() => target.classList.remove('highlighted'), 2500);
+        }
+      }
+      const copyBtn = e.target.closest('.btn-copy-excerpt');
+      if (copyBtn) {
+        const card = copyBtn.closest('.excerpt-card');
+        const txt = card ? card.querySelector('.excerpt-text')?.innerText : '';
+        if (txt) {
+          navigator.clipboard.writeText(txt);
+          copyBtn.textContent = '✔️ Copied!';
+          setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 2000);
         }
       }
     });
