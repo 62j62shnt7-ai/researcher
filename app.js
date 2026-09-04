@@ -594,26 +594,26 @@
     }
 
     const selectedModel = state.model || (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value) || 'gemini-3-flash-preview';
-    const fallbackList = (state.discoveredModels && state.discoveredModels.length > 0) ? state.discoveredModels : ['gemini-3-flash-preview', 'gemini-3.8-flash', 'gemini-3.7-flash', 'gemini-flash-latest', 'gemma-4-31b-it'];
-    const modelsToTry = [selectedModel, ...fallbackList].filter((m, i, arr) => m && arr.indexOf(m) === i);
+    const fallbackList = ['gemini-3-flash-preview', 'gemini-3.7-flash', 'gemini-3.8-flash', 'gemma-4-31b-it'];
+    const modelsToTry = [selectedModel, ...fallbackList].filter((m, i, arr) => m && arr.indexOf(m) === i && !m.includes('2.5'));
 
     let lastError = null;
 
     let contextText = '';
     if (retrievedChunks && retrievedChunks.length > 0) {
-      contextText = 'ENGINEERING CODE & STANDARD EXCERPTS:\n\n' +
+      contextText = 'ENGINEERING CODE & STANDARD EXCERPTS (Ground your answer strictly on these excerpts):\n\n' +
         retrievedChunks.map((c, i) =>
-          `[Source ${i + 1}]: File: "${c.file}", Clause/Section: "${c.clause}", Page: ${c.page}\nExcerpt:\n${c.text}`
+          `[Source ${i + 1}]: Document: "${c.file}", Clause/Section: "${c.clause}", Page: ${c.page}\nExcerpt:\n${c.text}`
         ).join('\n\n---\n\n');
     }
 
-    const scopeInstruction = docScope !== 'all' ? `You are specifically answering questions regarding the engineering code: "${docScope}". Focus strictly on this document.` : 'You are answering based on all available engineering codes & standards.';
+    const scopeInstruction = docScope !== 'all' ? `You are specifically answering questions regarding the engineering code: "${docScope}". Answer strictly based on this document.` : 'You are answering based on the provided engineering codes and standards.';
 
     const systemInstruction = `You are Researcher AI, an expert engineering codes & standards assistant. ${scopeInstruction}
-If context excerpts are provided above, use them strictly to answer the user's question. 
-Always quote exact clause numbers (e.g. Para 304.1.2, UG-27), values, tolerances, and cite sources in brackets like [Source 1] or [File, Page X].
-Where equations are present, format them clearly in standard LaTeX math notation using $inline$ or $$display$$ syntax.
-If context is insufficient, state clearly what is specified in the codes and what is general engineering practice.`;
+Answer the user's question directly, clearly, and logically using the provided code excerpts.
+Explain requirements practically: what they mean, conditions, tolerances, and design limits.
+Always cite the exact clause numbers (e.g. Para 304.1.2, Clause 6.2, UG-27), formulas, and source brackets like [Source 1].
+Never output internal thinking or raw prompt instructions. If context is insufficient, state clearly what is in the document and what is general engineering knowledge.`;
 
     // Multi-turn conversation contents:
     const contents = [];
@@ -642,12 +642,6 @@ If context is insufficient, state clearly what is specified in the codes and wha
         temperature: 0.2,
         maxOutputTokens: 8192
       };
-
-      if (isDeepReasoning && (modelName.includes('thinking') || modelName.includes('3') || modelName.includes('flash'))) {
-        generationConfig.thinkingConfig = {
-          thinkingBudget: 2048
-        };
-      }
 
       const body = {
         contents,
@@ -699,9 +693,12 @@ If context is insufficient, state clearly what is specified in the codes and wha
                 const data = JSON.parse(jsonStr);
                 const parts = data.candidates?.[0]?.content?.parts || [];
                 for (const part of parts) {
-                  if (part.text) {
-                    fullText += part.text;
-                    if (onDelta) onDelta(part.text, fullText);
+                  if (part.thought) continue;
+                  let t = part.text || '';
+                  t = t.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').replace(/<thought>[\s\S]*?(<\/thought>|$)/g, '');
+                  if (t) {
+                    fullText += t;
+                    if (onDelta) onDelta(t, fullText);
                   }
                 }
               } catch (parseErr) {}
@@ -759,7 +756,13 @@ If context is insufficient, state clearly what is specified in the codes and wha
     });
 
     scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, topK).filter(s => s.score > 0.05).map(s => ({ ...s.chunk, score: s.score }));
+    let topHits = scored.slice(0, topK).filter(s => s.score > 0.05).map(s => ({ ...s.chunk, score: s.score }));
+    // Fallback: if no keyword match was found (e.g. broad question like 'summarize' or 'what is this code about'),
+    // always return the leading chunks of the document so the AI is never starved of context
+    if (topHits.length === 0 && allChunks.length > 0) {
+      topHits = allChunks.slice(0, Math.min(topK, 6)).map(c => ({ ...c, score: 0.1 }));
+    }
+    return topHits;
   }
 
   // --- Client-Side File Processing (PDF / DOCX / TXT) ---
@@ -796,8 +799,8 @@ If context is insufficient, state clearly what is specified in the codes and wha
       const text = pageInfo.text || '';
       if (!text.trim()) continue;
 
-      const chunkSize = 800;
-      const overlap = 100;
+      const chunkSize = 1800;
+      const overlap = 200;
       let start = 0;
 
       while (start < text.length) {
@@ -821,104 +824,6 @@ If context is insufficient, state clearly what is specified in the codes and wha
       }
     }
 
-    // Compute vector embeddings for uploaded document chunks with live progress indicator
-    const progressBanner = document.getElementById('embedding-progress-banner');
-    const progressStatusMsg = document.getElementById('progress-status-msg');
-    const progressPercent = document.getElementById('progress-percent');
-    const progressBarFill = document.getElementById('progress-bar-fill');
-
-    if (progressBanner) {
-      progressBanner.classList.remove('hidden');
-      if (progressStatusMsg) progressStatusMsg.textContent = `⚡ Preparing vector embeddings for ${filename}...`;
-      if (progressPercent) progressPercent.textContent = `0%`;
-      if (progressBarFill) progressBarFill.style.width = `0%`;
-    }
-
-    const totalChunks = chunks.length;
-    if (totalChunks > 0) {
-      // Batch embedding strategy: batchEmbedContents for Gemini API (up to 16 chunks per request)
-      if (state.apiKey) {
-        const batchSize = 16;
-        const candidateModels = ['gemini-embedding-2', 'text-embedding-004'];
-
-        for (let i = 0; i < totalChunks; i += batchSize) {
-          const slice = chunks.slice(i, i + batchSize);
-          const currentCount = Math.min(i + batchSize, totalChunks);
-          const percent = Math.round((currentCount / totalChunks) * 100);
-
-          if (progressStatusMsg) {
-            progressStatusMsg.textContent = `⚡ Computing Gemini batch embeddings: ${currentCount}/${totalChunks} chunks (${filename})`;
-          }
-          if (progressPercent) progressPercent.textContent = `${percent}%`;
-          if (progressBarFill) progressBarFill.style.width = `${percent}%`;
-
-          let batchSuccess = false;
-          for (const embedModel of candidateModels) {
-            const batchUrl = `https://generativelanguage.googleapis.com/v1beta/models/${embedModel}:batchEmbedContents`;
-            const requests = slice.map(c => ({
-              model: `models/${embedModel}`,
-              content: { parts: [{ text: c.text.substring(0, 8000) }] }
-            }));
-
-            try {
-              const res = await fetch(batchUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
-                body: JSON.stringify({ requests })
-              });
-
-              if (res.ok) {
-                const data = await res.json();
-                const embeddings = data.embeddings || [];
-                embeddings.forEach((emb, idx) => {
-                  if (emb.values && slice[idx]) {
-                    slice[idx].embedding = emb.values;
-                  }
-                });
-                batchSuccess = true;
-                break;
-              }
-            } catch (e) {
-              console.warn(`Batch embedding error with ${embedModel}:`, e);
-            }
-          }
-
-          if (!batchSuccess) {
-            for (const chunk of slice) {
-              try {
-                chunk.embedding = await fetchQueryEmbedding(chunk.text);
-              } catch (err) {}
-            }
-          }
-        }
-      } else {
-        // Local browser embedder fallback
-        for (let idx = 0; idx < totalChunks; idx++) {
-          const chunk = chunks[idx];
-          const percent = Math.round(((idx + 1) / totalChunks) * 100);
-          if (progressStatusMsg) {
-            progressStatusMsg.textContent = `⚡ Computing local embeddings: ${idx + 1}/${totalChunks} chunks (${filename})`;
-          }
-          if (progressPercent) progressPercent.textContent = `${percent}%`;
-          if (progressBarFill) progressBarFill.style.width = `${percent}%`;
-
-          try {
-            chunk.embedding = await fetchQueryEmbedding(chunk.text);
-          } catch (e) {}
-        }
-      }
-    }
-
-    if (progressBanner) {
-      if (progressStatusMsg) progressStatusMsg.textContent = `✔️ Vector embeddings complete for ${filename}!`;
-      if (progressPercent) progressPercent.textContent = `100%`;
-      if (progressBarFill) progressBarFill.style.width = `100%`;
-      setTimeout(() => {
-        progressBanner.classList.add('hidden');
-      }, 2500);
-    }
-
-
     const docMeta = {
       id: docId,
       filename,
@@ -927,7 +832,27 @@ If context is insufficient, state clearly what is specified in the codes and wha
       uploadedAt: new Date().toISOString()
     };
 
+    // Save immediately into IndexedDB so the document is READY TO CHAT & SEARCH IN < 1 SECOND!
     await saveLocalDocument(docMeta, chunks);
+    updateLibraryUI();
+    populateDocScopeSelect();
+
+    // Progress banner feedback
+    const progressBanner = document.getElementById('embedding-progress-banner');
+    const progressStatusMsg = document.getElementById('progress-status-msg');
+    const progressPercent = document.getElementById('progress-percent');
+    const progressBarFill = document.getElementById('progress-bar-fill');
+
+    if (progressBanner) {
+      progressBanner.classList.remove('hidden');
+      if (progressStatusMsg) progressStatusMsg.textContent = `⚡ Document indexed! Ready for instant search & chat (${filename})`;
+      if (progressPercent) progressPercent.textContent = `100%`;
+      if (progressBarFill) progressBarFill.style.width = `100%`;
+      setTimeout(() => {
+        progressBanner.classList.add('hidden');
+      }, 1800);
+    }
+
     return docMeta;
   }
 
