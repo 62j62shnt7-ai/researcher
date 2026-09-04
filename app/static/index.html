@@ -6,6 +6,8 @@
 <title>Researcher — Document Chat</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin="anonymous">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js" crossorigin="anonymous"></script>
 <style>
 :root{
   --bg:#0f1216; --panel:#161b22; --panel2:#1c232c; --border:#2a3340;
@@ -94,6 +96,11 @@ a.cite:hover{text-decoration:underline}
 .msg .body th,.msg .body td{border:1px solid var(--border);padding:5px 10px}
 .msg .body ul,.msg .body ol{margin:4px 0 10px 22px}
 .msg .body h1,.msg .body h2,.msg .body h3{margin:12px 0 6px;font-size:15px}
+.katex{font-size:1.08em;color:#f1f5f9;text-rendering:optimizeLegibility}
+.katex-display{display:block;margin:14px 0 !important;padding:12px 16px;background:var(--panel2);border:1px solid var(--border);border-radius:var(--radius);overflow-x:auto;overflow-y:hidden;text-align:center;box-shadow:inset 0 1px 3px rgba(0,0,0,0.25)}
+.katex-display > .katex{display:inline-block;font-size:1.18em;text-align:center}
+.katex .mord,.katex .mbin,.katex .mrel,.katex .mop{color:#f8fafc}
+.katex-error{color:var(--warn);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:0.9em}
 .sources{margin-top:10px;font-size:12px}
 .sources summary{color:var(--muted);cursor:pointer;user-select:none}
 .src{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-top:6px}
@@ -279,6 +286,63 @@ let history = [];   // [{role, content}]
 let busy = false;
 
 marked.setOptions({breaks:true});
+
+function renderMarkdown(rawText) {
+  if (!rawText) return '';
+  const mathPlaceholders = [];
+  let placeholderIndex = 0;
+
+  // 1. Extract and render block math ($$ ... $$ or \[ ... \])
+  let protectedText = rawText.replace(/\$\$([\s\S]*?)\$\$|\\\[([\s\S]*?)\\\]/g, (match, p1, p2) => {
+    const math = (p1 !== undefined ? p1 : p2).trim();
+    const token = `@@KATEX_BLOCK_${placeholderIndex++}@@`;
+    let rendered = '';
+    if (window.katex) {
+      try {
+        rendered = window.katex.renderToString(math, { displayMode: true, throwOnError: false });
+      } catch (e) {
+        rendered = `<div class="katex-display katex-error">$$${esc(math)}$$</div>`;
+      }
+    } else {
+      rendered = `<div class="katex-display">$$${esc(math)}$$</div>`;
+    }
+    mathPlaceholders.push({ token, html: rendered, isBlock: true });
+    return `\n\n${token}\n\n`;
+  });
+
+  // 2. Extract and render inline math ($ ... $ or \( ... \))
+  protectedText = protectedText.replace(/(^|[^\$\w\\])\$([^\$\n]+?)\$(?=[^\$\w]|$)|\\\(([\s\S]*?)\\\)/g, (match, prefix, p1, p2) => {
+    const math = (p1 !== undefined ? p1 : p2).trim();
+    if (!math || /^\d+(?:[.,]\d+)?$/.test(math)) return match;
+    const token = `@@KATEX_INL_${placeholderIndex++}@@`;
+    let rendered = '';
+    if (window.katex) {
+      try {
+        rendered = window.katex.renderToString(math, { displayMode: false, throwOnError: false });
+      } catch (e) {
+        rendered = `<span class="katex katex-error">$${esc(math)}$</span>`;
+      }
+    } else {
+      rendered = `<span class="katex">$${esc(math)}$</span>`;
+    }
+    mathPlaceholders.push({ token, html: rendered, isBlock: false });
+    return (prefix || '') + token;
+  });
+
+  // 3. Safe Markdown parsing
+  let html = marked.parse(protectedText);
+
+  // 4. Restore rendered math HTML
+  for (const item of mathPlaceholders) {
+    if (item.isBlock) {
+      const blockP = new RegExp(`<p>\\s*${item.token}\\s*<\\/p>`, 'g');
+      html = html.replace(blockP, item.html);
+    }
+    html = html.replace(new RegExp(item.token, 'g'), item.html);
+  }
+
+  return html;
+}
 
 // ---------- documents ----------
 let docSel = {};   // doc_id -> included in chat scope (default true)
@@ -523,7 +587,7 @@ async function loadChat(id){
   for(const m of d.messages){
     if(m.role==='user'){ lastQuestion = m.content; addMsg('user', esc(m.content).replace(/\n/g,'<br>')); }
     else {
-      const b = addMsg('assistant', marked.parse(m.content));
+      const b = addMsg('assistant', renderMarkdown(m.content));
       if(m.sources && m.sources.length){ linkifyCites(b, m.sources); renderSources(b, m.sources); }
       addMsgTools(b, m.content, m.sources||[]);
     }
@@ -587,7 +651,7 @@ async function send(){
             $('tpsWrap').textContent = `⚡ ${tps.toFixed(1)} tok/s · ${nTok} tokens`;
           }
           const disp = stripThink(answer);
-          body.innerHTML = disp ? marked.parse(disp) : '<span class="typing">Reasoning…</span>';
+          body.innerHTML = disp ? renderMarkdown(disp) : '<span class="typing">Reasoning…</span>';
           $('chat').scrollTop = $('chat').scrollHeight;
         }
         else if(ev.type==='error'){ gotError = true; body.innerHTML = `<div class="errbox">${esc(ev.text)}</div>`; }
@@ -598,7 +662,7 @@ async function send(){
     if(e.name === 'AbortError'){
       aborted = true;
       const disp = stripThink(answer);
-      if(disp) body.innerHTML = marked.parse(disp) + '<p style="color:var(--muted);font-size:12px">⏹ stopped</p>';
+      if(disp) body.innerHTML = renderMarkdown(disp) + '<p style="color:var(--muted);font-size:12px">⏹ stopped</p>';
       else body.innerHTML = '<span style="color:var(--muted)">⏹ stopped</span>';
     } else {
       gotError = true;
@@ -607,6 +671,7 @@ async function send(){
   }finally{
     const finalAnswer = stripThink(answer);
     if(finalAnswer){
+      body.innerHTML = renderMarkdown(finalAnswer);
       history.push({role:'assistant', content:finalAnswer});
       linkifyCites(body, sources);
       renderSources(body, sources);
