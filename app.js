@@ -4,9 +4,12 @@
 const $ = id => document.getElementById(id);
 const esc = s => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-// Configure marked with breaks
+// Configure marked with breaks and KaTeX math extension
 if (window.marked) {
   marked.setOptions({ breaks: true });
+  if (window.markedKatex) {
+    marked.use(window.markedKatex({ throwOnError: false, nonStandard: true }));
+  }
 }
 
 // Global State

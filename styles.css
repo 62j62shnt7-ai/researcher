@@ -501,6 +501,45 @@ button {
   color: #fff;
 }
 
+/* ---------- KaTeX Math & Formula Styling ---------- */
+.katex {
+  font-size: 1.08em;
+  color: #f1f5f9;
+  text-rendering: optimizeLegibility;
+}
+
+.katex-display {
+  display: block;
+  margin: 14px 0 !important;
+  padding: 14px 18px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+.katex-display > .katex {
+  display: inline-block;
+  font-size: 1.18em;
+  text-align: center;
+}
+
+.katex .mord,
+.katex .mbin,
+.katex .mrel,
+.katex .mop {
+  color: #f8fafc;
+}
+
+.katex-error {
+  color: var(--warn);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+}
+
 mark {
   background: rgba(217, 162, 60, 0.35);
   color: inherit;
