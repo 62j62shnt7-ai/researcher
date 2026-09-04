@@ -184,7 +184,25 @@ def build_knowledge_base():
     all_files = [f for f in codes_dir.glob("*") if f.suffix.lower() in supported_exts]
     
     print(f"Found {len(all_files)} document(s) in codes/")
-    
+
+    root_kb = Path("knowledge_base.json")
+    if "--force" not in sys.argv and root_kb.exists() and root_kb.stat().st_size > 1000:
+        try:
+            with open(root_kb, "r", encoding="utf-8") as f:
+                existing_kb = json.load(f)
+            indexed_files = {d.get("filename") for d in existing_kb.get("documents", [])}
+            current_files = {f.name for f in all_files}
+            if current_files.issubset(indexed_files) and len(existing_kb.get("chunks", [])) > 0:
+                print(f"All documents in codes/ are already indexed in knowledge_base.json ({len(existing_kb['chunks'])} chunks from {len(indexed_files)} files).")
+                print("Skipping full rebuild (use --force to override).")
+                out_kb = out_dir / "knowledge_base.json"
+                if not out_kb.exists():
+                    import shutil
+                    shutil.copyfile(root_kb, out_kb)
+                return
+        except Exception as e:
+            print(f"Could not verify existing index ({e}), proceeding with build...")
+
     documents_meta = []
     all_chunks = []
     embedding_failed_count = 0
