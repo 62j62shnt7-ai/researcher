@@ -13,6 +13,9 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import logging
+
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse

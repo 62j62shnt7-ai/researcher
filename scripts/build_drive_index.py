@@ -15,7 +15,10 @@ import math
 import urllib.request
 import urllib.parse
 import urllib.error
+import logging
 from pathlib import Path
+
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 def extract_pdf_pages(file_path):
     pages = []

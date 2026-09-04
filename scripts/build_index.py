@@ -13,7 +13,10 @@ import math
 import urllib.request
 import urllib.parse
 import urllib.error
+import logging
 from pathlib import Path
+
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 # Helper for parsing PDF using pypdf or fallback
 def extract_pdf_pages(file_path):

@@ -3,8 +3,11 @@
 Each parser returns a list of blocks: {"text": str, "location": str}.
 Blocks are then merged/split into overlapping chunks that keep their location label.
 """
+import logging
 import re
 from pathlib import Path
+
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 SUPPORTED_EXTS = {
     ".pdf", ".docx", ".doc", ".xlsx", ".xlsm", ".csv", ".tsv",
