@@ -1,21 +1,19 @@
-name: Build Knowledge Base & Deploy to GitHub Pages
+name: Deploy Researcher to GitHub Pages
 
 on:
   push:
     branches:
       - main
     paths:
-      - 'codes/**'
-      - 'scripts/**'
       - 'index.html'
       - 'styles.css'
       - 'app.js'
-      - 'requirements.txt'
+      - 'knowledge_base.json'
       - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
   pages: write
   id-token: write
 
@@ -24,65 +22,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-
-      - name: Check if Knowledge Base rebuild is needed
-        id: check_kb
-        run: |
-          if [ ! -f "knowledge_base.json" ] || [ ! -s "knowledge_base.json" ]; then
-            echo "need_build=true" >> $GITHUB_OUTPUT
-            echo "knowledge_base.json not found or empty. Full build needed."
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "need_build=true" >> $GITHUB_OUTPUT
-            echo "Manual dispatch requested. Full build needed."
-          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] && git rev-parse --verify "${{ github.event.before }}" >/dev/null 2>&1; then
-            if git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" | grep -q '^codes/'; then
-              echo "need_build=true" >> $GITHUB_OUTPUT
-              echo "Changes detected in codes/ folder. Rebuilding index."
-            else
-              echo "need_build=false" >> $GITHUB_OUTPUT
-              echo "No changes in codes/ and knowledge_base.json is ready. Skipping heavy build!"
-            fi
-          else
-            echo "need_build=false" >> $GITHUB_OUTPUT
-            echo "knowledge_base.json exists and is ready. Fast deploy mode enabled!"
-          fi
-
-      - name: Set up Python
-        if: steps.check_kb.outputs.need_build == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: 'pip'
-
-      - name: Cache FastEmbed & HuggingFace Models
-        if: steps.check_kb.outputs.need_build == 'true'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/fastembed
-            ~/.cache/huggingface
-          key: fastembed-models-${{ runner.os }}-bge-small-en-v1.5
-
-      - name: Install dependencies
-        if: steps.check_kb.outputs.need_build == 'true'
-        run: |
-          python -m pip install --upgrade pip
-          pip install pypdf pdfplumber python-docx openpyxl fastembed fonttools
-
-      - name: Build Knowledge Base Index (Free FastEmbed + Gemini)
-        if: steps.check_kb.outputs.need_build == 'true'
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          python scripts/build_index.py
 
       - name: Stage Public Distribution
         run: |
