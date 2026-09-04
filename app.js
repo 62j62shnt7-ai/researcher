@@ -1,1775 +1,1108 @@
-/**
- * Researcher AI - Client App Engine
- * Hybrid RAG (BM25 + Gemini Embeddings) with Cloud Storage & Selective Code Picker
- */
+// Researcher — Client-Side Engineering RAG Web App
+// 100% pure client-side for GitHub Pages, matching the local desktop app experience.
 
-(function () {
-  'use strict';
+const $ = id => document.getElementById(id);
+const esc = s => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
-  // Global State
-  const state = {
-    apiKey: localStorage.getItem('gemini_api_key') || '',
-    model: localStorage.getItem('gemini_model') || 'gemini-3-flash-preview',
-    discoveredModels: [],
-    cloudUrl: localStorage.getItem('cloud_storage_url') || '',
+// Configure marked with breaks
+if (window.marked) {
+  marked.setOptions({ breaks: true });
+}
 
-    repoKB: { documents: [], chunks: [], embedding_model: '', dimensions: 0 },
-    localDocs: [],
-    localChunks: [],
-    chatHistory: [], // Multi-turn conversational memory
-    activeFilter: 'all',
-    db: null,
-    fetchedDriveFiles: []
+// Global State
+let db = null;
+let documents = [];        // [{id, filename, format, pages, chunk_count, status, is_repo}]
+let chunks = [];           // [{id, doc_id, filename, text, page, clause, tokens}]
+let docSel = {};           // doc_id -> boolean (included in chat scope)
+let chats = [];            // [{id, title, messages: [{role, content, sources, tps}], created_at}]
+let activeChatId = null;
+let isBusy = false;
+let abortController = null;
+
+const DEFAULT_SETTINGS = {
+  apiKey: '',
+  model: 'gemini-3-flash-preview',
+  topK: 6,
+  vectorWeight: 0.5
+};
+
+let settings = { ...DEFAULT_SETTINGS };
+
+// Load settings from localStorage
+function loadSettings() {
+  try {
+    const saved = localStorage.getItem('researcher_settings');
+    if (saved) {
+      settings = { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+    }
+  } catch (e) {
+    console.error('Failed to load settings:', e);
+  }
+}
+
+function saveSettings() {
+  try {
+    localStorage.setItem('researcher_settings', JSON.stringify(settings));
+  } catch (e) {
+    console.error('Failed to save settings:', e);
+  }
+}
+
+// ----------------------------------------------------
+// IndexedDB Storage
+// ----------------------------------------------------
+function openDatabase() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('researcher_online_v1', 1);
+    req.onupgradeneeded = e => {
+      const d = e.target.result;
+      if (!d.objectStoreNames.contains('documents')) {
+        d.createObjectStore('documents', { keyPath: 'id' });
+      }
+      if (!d.objectStoreNames.contains('chunks')) {
+        const chunkStore = d.createObjectStore('chunks', { keyPath: 'id' });
+        chunkStore.createIndex('doc_id', 'doc_id', { unique: false });
+      }
+    };
+    req.onsuccess = e => {
+      db = e.target.result;
+      resolve(db);
+    };
+    req.onerror = e => reject(e.target.error);
+  });
+}
+
+function dbSaveDocAndChunks(doc, docChunks) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['documents', 'chunks'], 'readwrite');
+    const dStore = tx.objectStore('documents');
+    const cStore = tx.objectStore('chunks');
+    dStore.put(doc);
+    for (const c of docChunks) {
+      cStore.put(c);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = e => reject(e.target.error);
+  });
+}
+
+function dbDeleteDoc(docId) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['documents', 'chunks'], 'readwrite');
+    const dStore = tx.objectStore('documents');
+    const cStore = tx.objectStore('chunks');
+    dStore.delete(docId);
+    const idx = cStore.index('doc_id');
+    const range = IDBKeyRange.only(docId);
+    const req = idx.openCursor(range);
+    req.onsuccess = e => {
+      const cursor = e.target.result;
+      if (cursor) {
+        cursor.delete();
+        cursor.continue();
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = e => reject(e.target.error);
+  });
+}
+
+function dbClearLocalDocs() {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['documents', 'chunks'], 'readwrite');
+    tx.objectStore('documents').clear();
+    tx.objectStore('chunks').clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = e => reject(e.target.error);
+  });
+}
+
+function dbLoadAll() {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(['documents', 'chunks'], 'readonly');
+    const dStore = tx.objectStore('documents');
+    const cStore = tx.objectStore('chunks');
+    const dReq = dStore.getAll();
+    const cReq = cStore.getAll();
+    let loadedDocs = [], loadedChunks = [];
+    dReq.onsuccess = () => { loadedDocs = dReq.result || []; };
+    cReq.onsuccess = () => { loadedChunks = cReq.result || []; };
+    tx.oncomplete = () => resolve({ docs: loadedDocs, chunks: loadedChunks });
+    tx.onerror = e => reject(e.target.error);
+  });
+}
+
+// ----------------------------------------------------
+// Load Initial Documents (Repository + Local IndexedDB)
+// ----------------------------------------------------
+async function initializeLibrary() {
+  try {
+    await openDatabase();
+    const localData = await dbLoadAll();
+
+    // Check if repo knowledge_base.json exists
+    let repoDocs = [];
+    let repoChunks = [];
+    try {
+      const resp = await fetch('knowledge_base.json', { cache: 'no-cache' });
+      if (resp.ok) {
+        const kb = await resp.json();
+        if (kb.documents && Array.isArray(kb.documents)) {
+          repoDocs = kb.documents.map(d => ({ ...d, is_repo: true }));
+        }
+        if (kb.chunks && Array.isArray(kb.chunks)) {
+          repoChunks = kb.chunks.map(c => ({
+            ...c,
+            tokens: tokenize(c.text || '')
+          }));
+        }
+      }
+    } catch (e) {
+      console.log('No repository knowledge_base.json found or failed to load:', e);
+    }
+
+    // Merge repo and local documents
+    documents = [...repoDocs, ...localData.docs];
+    chunks = [...repoChunks, ...localData.chunks];
+
+    // Initialize doc selection (default to checked)
+    for (const d of documents) {
+      if (!(d.id in docSel)) {
+        docSel[d.id] = true;
+      }
+    }
+
+    refreshDocsList();
+    updateStats();
+  } catch (err) {
+    console.error('Library initialization error:', err);
+    $('embDot').className = 'dot bad';
+    $('embStatus').textContent = 'library error';
+  }
+}
+
+// ----------------------------------------------------
+// Document Selection & Scoping
+// ----------------------------------------------------
+function selectedDocIds() {
+  return Object.keys(docSel).filter(id => docSel[id]);
+}
+
+function updateSelInfo() {
+  const total = documents.length;
+  const sel = selectedDocIds().length;
+  $('selInfo').textContent = total ? `chat scope: ${sel === total ? 'all' : sel + '/' + total} docs ·` : '';
+}
+
+function toggleSel(id, val) {
+  docSel[id] = val;
+  const row = document.querySelector(`.doc[data-id="${id}"]`);
+  if (row) {
+    row.classList.toggle('excluded', !val);
+  }
+  updateSelInfo();
+}
+
+function selectAll(val) {
+  for (const d of documents) {
+    docSel[d.id] = val;
+  }
+  document.querySelectorAll('.doc').forEach(el => el.classList.toggle('excluded', !val));
+  document.querySelectorAll('.doc input[type=checkbox]').forEach(cb => cb.checked = val);
+  updateSelInfo();
+}
+
+async function clearLocalDocs() {
+  const localDocs = documents.filter(d => !d.is_repo);
+  if (localDocs.length === 0) {
+    alert('No local documents to clear.');
+    return;
+  }
+  if (!confirm(`Delete all ${localDocs.length} uploaded documents from this device?`)) return;
+
+  await dbClearLocalDocs();
+  documents = documents.filter(d => d.is_repo);
+  chunks = chunks.filter(c => documents.some(d => d.id === c.doc_id));
+  docSel = {};
+  for (const d of documents) docSel[d.id] = true;
+  refreshDocsList();
+  updateStats();
+}
+
+async function deleteDocument(id) {
+  const doc = documents.find(d => String(d.id) === String(id));
+  if (!doc) return;
+  if (doc.is_repo) {
+    alert('Pre-indexed repository standards cannot be deleted from the browser. You can uncheck them to exclude them from chat.');
+    return;
+  }
+  if (!confirm(`Remove "${doc.filename}" from library?`)) return;
+
+  await dbDeleteDoc(doc.id);
+  documents = documents.filter(d => d.id !== doc.id);
+  chunks = chunks.filter(c => c.doc_id !== doc.id);
+  delete docSel[doc.id];
+  refreshDocsList();
+  updateStats();
+}
+
+function refreshDocsList() {
+  const list = $('docList');
+  list.innerHTML = '';
+
+  for (const d of documents) {
+    const isChecked = docSel[d.id] !== false;
+    const div = document.createElement('div');
+    div.className = 'doc' + (isChecked ? '' : ' excluded');
+    div.dataset.id = d.id;
+
+    const pageLabel = d.pages ? `${d.pages} pages • ` : '';
+    const meta = `${(d.format || 'doc').toUpperCase()} • ${pageLabel}${d.chunk_count || 0} chunks${d.is_repo ? ' • 📦 repo' : ''}`;
+    const badge = d.status === 'ready' ? 'ready' : (d.status || 'ready');
+    const cls = badge === 'ready' ? 'b-ready' : 'b-kw';
+
+    div.innerHTML = `
+      <input type="checkbox" title="Include in chat" ${isChecked ? 'checked' : ''} onchange="toggleSel('${d.id}', this.checked)">
+      <div style="flex:1;min-width:0">
+        <div class="name" title="${esc(d.filename)}">${esc(d.filename)}</div>
+        <div class="meta">${meta}</div>
+      </div>
+      <span class="badge ${cls}">${badge}</span>
+      ${!d.is_repo ? `<button title="Delete" onclick="deleteDocument('${d.id}')">✕</button>` : ''}
+    `;
+    list.appendChild(div);
+  }
+
+  updateSelInfo();
+}
+
+function updateStats() {
+  const docCount = documents.length;
+  const chunkCount = chunks.length;
+  $('stats').textContent = `${docCount} documents · ${chunkCount} chunks · hybrid ready`;
+  $('embDot').className = 'dot ok';
+  $('embStatus').textContent = `library ready (${docCount} docs)`;
+}
+
+// ----------------------------------------------------
+// File Upload & Client-Side Extraction
+// ----------------------------------------------------
+const uploadZone = $('uploadZone');
+const fileInput = $('fileInput');
+
+uploadZone.onclick = () => fileInput.click();
+fileInput.onchange = () => handleFiles(fileInput.files);
+
+uploadZone.ondragover = e => {
+  e.preventDefault();
+  uploadZone.classList.add('drag');
+};
+uploadZone.ondragleave = () => uploadZone.classList.remove('drag');
+uploadZone.ondrop = e => {
+  e.preventDefault();
+  uploadZone.classList.remove('drag');
+  handleFiles(e.dataTransfer.files);
+};
+
+async function handleFiles(fileList) {
+  if (!fileList || fileList.length === 0) return;
+  uploadZone.textContent = 'Parsing & indexing documents…';
+
+  try {
+    for (const file of fileList) {
+      await processUploadedFile(file);
+    }
+  } catch (err) {
+    console.error('Error processing file:', err);
+    alert('Failed to process document: ' + err.message);
+  } finally {
+    uploadZone.innerHTML = '⬆ Drop documents here or click to browse<br><span style="font-size:11px">PDF · Word · Excel · text</span>';
+    fileInput.value = '';
+    refreshDocsList();
+    updateStats();
+  }
+}
+
+async function processUploadedFile(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  let text = '';
+  let pages = 1;
+
+  if (ext === 'pdf') {
+    const arrayBuffer = await file.arrayBuffer();
+    if (!window.pdfjsLib) {
+      throw new Error('PDF.js library is not loaded');
+    }
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    pages = pdf.numPages;
+    const pageTexts = [];
+    for (let i = 1; i <= pages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const strings = content.items.map(item => item.str);
+      pageTexts.push(`[Page ${i}]\n` + strings.join(' '));
+    }
+    text = pageTexts.join('\n\n');
+  } else if (ext === 'docx') {
+    const arrayBuffer = await file.arrayBuffer();
+    if (!window.mammoth) {
+      throw new Error('Mammoth.js library is not loaded');
+    }
+    const result = await mammoth.extractRawText({ arrayBuffer });
+    text = result.value;
+  } else {
+    // Text, Markdown, CSV, JSON
+    text = await file.text();
+  }
+
+  if (!text || text.trim().length === 0) {
+    throw new Error(`No extractable text found in "${file.name}"`);
+  }
+
+  const docId = 'doc_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
+  const docChunks = splitIntoChunks(docId, file.name, text, pages);
+
+  const docRecord = {
+    id: docId,
+    filename: file.name,
+    format: ext,
+    pages: pages,
+    chunk_count: docChunks.length,
+    status: 'ready',
+    is_repo: false,
+    uploaded_at: new Date().toISOString()
   };
 
-  // DOM Elements holder
-  const elements = {};
+  await dbSaveDocAndChunks(docRecord, docChunks);
+  documents.push(docRecord);
+  chunks.push(...docChunks);
+  docSel[docId] = true;
+}
 
-  function initElements() {
-    elements.apiKeyInput = document.getElementById('api-key-input');
-    elements.chatModelSelect = document.getElementById('chat-model-select');
-    elements.modelSelect = document.getElementById('model-select');
-    elements.embeddingEngineSelect = document.getElementById('embedding-engine-select');
-    elements.deepReasoningToggle = document.getElementById('deep-reasoning-toggle');
+// Semantic Chunking with Clause Detection
+function splitIntoChunks(docId, filename, fullText, totalPages) {
+  const result = [];
+  const lines = fullText.split(/\r?\n/);
+  let curChunk = '';
+  let curPage = 1;
+  let curClause = '';
+  let chunkIdx = 0;
 
-    elements.cloudUrlInput = document.getElementById('cloud-url-input');
-
-    elements.btnFetchCloud = document.getElementById('btn-fetch-cloud');
-    elements.driveFilesContainer = document.getElementById('drive-files-container');
-    elements.driveFilesList = document.getElementById('drive-files-list');
-    elements.btnSelectAllDrive = document.getElementById('btn-select-all-drive');
-    elements.btnDeselectAllDrive = document.getElementById('btn-deselect-all-drive');
-    elements.btnImportSelectedDrive = document.getElementById('btn-import-selected-drive');
-    elements.btnSaveKey = document.getElementById('btn-save-key');
-    elements.btnTestKey = document.getElementById('btn-test-key');
-    elements.btnSettings = document.getElementById('btn-settings');
-    elements.settingsModal = document.getElementById('settings-modal');
-    elements.settingsStatus = document.getElementById('settings-status');
-    elements.btnClearChat = document.getElementById('btn-clear-chat');
-    elements.btnUpload = document.getElementById('btn-upload');
-    elements.fileInput = document.getElementById('file-input');
-    elements.btnLibrary = document.getElementById('btn-library');
-    elements.libraryModal = document.getElementById('library-modal');
-    elements.libCount = document.getElementById('lib-count');
-    elements.repoDocsList = document.getElementById('repo-docs-list');
-    elements.localDocsList = document.getElementById('local-docs-list');
-    elements.btnExportDb = document.getElementById('btn-export-db');
-    elements.btnImportDb = document.getElementById('btn-import-db');
-    elements.importDbInput = document.getElementById('import-db-input');
-    elements.searchInput = document.getElementById('search-input');
-    elements.searchClearBtn = document.getElementById('search-clear-btn');
-    elements.searchResultsSection = document.getElementById('search-results-section');
-    elements.resultsList = document.getElementById('results-list');
-    elements.resultsCount = document.getElementById('results-count');
-    elements.closeResultsBtn = document.getElementById('close-results-btn');
-    elements.chatMessages = document.getElementById('chat-messages');
-    elements.chatForm = document.getElementById('chat-form');
-    elements.chatInput = document.getElementById('chat-input');
-    elements.btnSend = document.getElementById('btn-send');
-    elements.useRagToggle = document.getElementById('use-rag-toggle');
-    elements.modelSelect = document.getElementById('model-select');
-    elements.docScopeSelect = document.getElementById('doc-scope-select');
-    elements.filterPills = document.querySelectorAll('.pill');
-  }
-
-  // Initialize PDF.js worker
-  if (window.pdfjsLib) {
-    try {
-      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-    } catch (e) {
-      console.warn('PDF.js worker setup error:', e);
-    }
-  }
-
-  // --- Dynamic Model Discovery ---
-  async function discoverUserModels(apiKey) {
-    if (!apiKey) return [];
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models`;
-      let res = await fetch(url, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey }
-      }).catch(() => null);
-
-      let models = [];
-      if (res && res.ok) {
-        const data = await res.json();
-        models = data.models || [];
-      } else {
-        res = await fetch(`${url}?key=${apiKey}`).catch(() => null);
-        if (res && res.ok) {
-          const data = await res.json();
-          models = data.models || [];
-        }
-      }
-
-      const generateModels = models.filter(m => m.supportedGenerationMethods?.includes('generateContent'));
-      // Sort to prioritize latest models (3-flash-preview, 3.8-flash, 3.7-flash, 3.5-flash, flash-latest, gemma-4)
-      generateModels.sort((a, b) => {
-        const getPriority = (name) => {
-          if (name.includes('3-flash-preview')) return 1;
-          if (name.includes('3.8-flash')) return 2;
-          if (name.includes('3.7-flash')) return 3;
-          if (name.includes('3.5-flash')) return 4;
-          if (name.includes('flash-latest')) return 5;
-          if (name.includes('gemma-4')) return 6;
-          if (name.includes('pro')) return 8;
-          return 10;
-        };
-        return getPriority(a.name) - getPriority(b.name);
+  const flush = () => {
+    if (curChunk.trim().length > 30) {
+      result.push({
+        id: `${docId}_c${chunkIdx++}`,
+        doc_id: docId,
+        filename: filename,
+        text: curChunk.trim(),
+        page: curPage,
+        clause: curClause || `Section ${chunkIdx}`,
+        tokens: tokenize(curChunk)
       });
-      const generateModelNames = generateModels.map(m => m.name.replace('models/', ''));
-      state.discoveredModels = generateModelNames;
+      // 15% overlap for continuity
+      const words = curChunk.trim().split(/\s+/);
+      curChunk = words.slice(Math.max(0, words.length - 25)).join(' ') + '\n';
+    }
+  };
 
-      const selectElements = [
-        elements.chatModelSelect,
-        elements.modelSelect,
-        document.getElementById('chat-model-select'),
-        document.getElementById('model-select')
-      ].filter((el, idx, self) => el && self.indexOf(el) === idx);
+  for (const line of lines) {
+    // Detect page markers
+    const pgMatch = line.match(/\[Page\s+(\d+)\]/i);
+    if (pgMatch) {
+      curPage = parseInt(pgMatch[1], 10);
+      continue;
+    }
 
-      if (generateModels.length > 0 && selectElements.length > 0) {
-        if (!generateModelNames.includes(state.model)) {
-          state.model = generateModelNames[0];
-          localStorage.setItem('gemini_model', state.model);
-        }
+    // Detect clause/section headings (e.g. "Article 3.1", "304.1.2", "Section 4", "Table 2")
+    const clauseMatch = line.match(/^([A-Z0-9.\-_]{2,15}(\s+[A-Za-z0-9.\-_]+){0,4})/);
+    if (clauseMatch && line.length < 80 && line.trim().length > 2) {
+      curClause = clauseMatch[1].trim();
+    }
 
-        selectElements.forEach(selectEl => {
-          selectEl.innerHTML = '';
-          generateModels.forEach(m => {
-            const modelId = m.name.replace('models/', '');
-            const opt = document.createElement('option');
-            opt.value = modelId;
-            opt.textContent = `${m.displayName || modelId}`;
-            if (modelId === state.model) {
-              opt.selected = true;
-            }
-            selectEl.appendChild(opt);
-          });
-        });
-      } else if (selectElements.length > 0) {
-        selectElements.forEach(selectEl => {
-          selectEl.innerHTML = '<option value="">❌ No generateContent models found for this key</option>';
-        });
+    curChunk += line + '\n';
+    if (curChunk.length >= 850) {
+      flush();
+    }
+  }
+  flush();
+
+  return result;
+}
+
+function tokenize(text) {
+  return (text.toLowerCase().match(/[a-z0-9_\-\.]{2,}/g) || []);
+}
+
+// ----------------------------------------------------
+// Scoped Search & RAG Retrieval
+// ----------------------------------------------------
+function retrieveContext(query, topK = 6) {
+  const allowedDocIds = new Set(selectedDocIds().map(String));
+  if (allowedDocIds.size === 0) {
+    return [];
+  }
+
+  // Filter chunks by selected docs
+  const scopedChunks = chunks.filter(c => allowedDocIds.has(String(c.doc_id)));
+  if (scopedChunks.length === 0) return [];
+
+  const qTokens = tokenize(query);
+  if (qTokens.length === 0) {
+    return scopedChunks.slice(0, topK);
+  }
+
+  // Clause boost terms (numbers, decimals, code designations)
+  const isClauseTerm = t => /\d/.test(t) || t.length > 5;
+
+  const scored = [];
+  for (let i = 0; i < scopedChunks.length; i++) {
+    const c = scopedChunks[i];
+    const chunkTokens = c.tokens || tokenize(c.text);
+    const tokenSet = new Set(chunkTokens);
+
+    let score = 0;
+    for (const q of qTokens) {
+      if (tokenSet.has(q)) {
+        score += isClauseTerm(q) ? 3.0 : 1.0;
+      } else if (c.text.toLowerCase().includes(q)) {
+        score += 0.5;
       }
-      return generateModelNames;
-    } catch (e) {
-      console.warn('Could not auto-discover models:', e);
-      return [];
+    }
+
+    // Boost if query matches clause header
+    if (c.clause) {
+      const clLower = c.clause.toLowerCase();
+      for (const q of qTokens) {
+        if (clLower.includes(q)) score += 4.0;
+      }
+    }
+
+    if (score > 0) {
+      scored.push({ chunk: c, score, index: i });
     }
   }
 
+  scored.sort((a, b) => b.score - a.score);
 
+  // Fallback: If broad question has very few matches, include introduction chunks
+  if (scored.length < 2) {
+    const fallbackMap = new Map();
+    for (const docId of allowedDocIds) {
+      const docLeadChunks = scopedChunks.filter(c => String(c.doc_id) === String(docId)).slice(0, 3);
+      for (const fc of docLeadChunks) {
+        fallbackMap.set(fc.id, fc);
+      }
+    }
+    for (const s of scored) {
+      fallbackMap.set(s.chunk.id, s.chunk);
+    }
+    return Array.from(fallbackMap.values()).slice(0, topK);
+  }
 
-  // --- IndexedDB Local Storage ---
-  function initIndexedDB() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open('ResearcherLocalDB', 1);
-      req.onupgradeneeded = (e) => {
-        const db = e.target.result;
-        if (!db.objectStoreNames.contains('documents')) {
-          db.createObjectStore('documents', { keyPath: 'id' });
-        }
-        if (!db.objectStoreNames.contains('chunks')) {
-          db.createObjectStore('chunks', { keyPath: 'id' });
-        }
-      };
-      req.onsuccess = (e) => {
-        state.db = e.target.result;
-        loadLocalData().then(resolve);
-      };
-      req.onerror = (e) => reject(e);
+  // Neighbor expansion: Add immediate adjacent chunks for top 3 matches to prevent cutting clauses
+  const selectedMap = new Map();
+  for (const item of scored.slice(0, topK)) {
+    selectedMap.set(item.chunk.id, item.chunk);
+
+    // Expand previous chunk
+    if (item.index > 0) {
+      const prev = scopedChunks[item.index - 1];
+      if (prev && prev.doc_id === item.chunk.doc_id && !selectedMap.has(prev.id)) {
+        selectedMap.set(prev.id, prev);
+      }
+    }
+    // Expand next chunk
+    if (item.index < scopedChunks.length - 1) {
+      const next = scopedChunks[item.index + 1];
+      if (next && next.doc_id === item.chunk.doc_id && !selectedMap.has(next.id)) {
+        selectedMap.set(next.id, next);
+      }
+    }
+  }
+
+  return Array.from(selectedMap.values()).slice(0, topK + 3);
+}
+
+// ----------------------------------------------------
+// Chat & Gemini Streaming Engine
+// ----------------------------------------------------
+const SYSTEM_PROMPT = `You are a Senior Engineering Codes & Standards Specialist.
+Your job is to provide accurate, definitive, and strictly grounded engineering analysis based on the retrieved code excerpts.
+
+CRITICAL RULES:
+1. Always cite exact clauses, paragraphs, sections, and page numbers where available. Use bracket citations like [1], [2] corresponding to the excerpts.
+2. If equations or formulas apply, write them cleanly using LaTeX format (e.g. $t = \\frac{PD}{2(SEW + PY)}$).
+3. If specific design factors, material allowable stresses, or temperature limits are requested, extract and tabulate them clearly.
+4. When comparing multiple codes, present a clear markdown table highlighting differences, scope applicability, and testing criteria.
+5. If the excerpts do not contain the answer, explicitly state what is missing rather than inventing values.`;
+
+async function streamChatResponse(userPrompt) {
+  if (!settings.apiKey) {
+    openSettingsModal();
+    alert('Please enter your Google Gemini API Key in Settings to start chatting.');
+    return;
+  }
+
+  const useRAG = $('useLibrary').checked;
+  const isCompare = $('compareMode').checked;
+
+  let contextExcerpts = [];
+  if (useRAG) {
+    contextExcerpts = retrieveContext(userPrompt, settings.topK || 6);
+  }
+
+  // Add User Message to Chat UI
+  addMessageToUI('user', userPrompt);
+  $('input').value = '';
+  $('input').style.height = 'auto';
+
+  // Build Assistant Message UI Container
+  const assistantBody = addMessageToUI('assistant', '<span class="typing">Thinking…</span>');
+
+  // Build Context Header
+  let augmentedPrompt = userPrompt;
+  if (contextExcerpts.length > 0) {
+    let contextStr = '--- RETRIEVED CODES & STANDARDS EXCERPTS ---\n\n';
+    contextExcerpts.forEach((c, idx) => {
+      contextStr += `[${idx + 1}] Document: "${c.filename}" | Clause: ${c.clause || 'General'} | Page: ${c.page || 'N/A'}\n${c.text}\n\n`;
     });
-  }
+    contextStr += '--- END EXCERPTS ---\n\n';
 
-  function loadLocalData() {
-    return new Promise((resolve) => {
-      if (!state.db) return resolve();
-      const tx = state.db.transaction(['documents', 'chunks'], 'readonly');
-      const docStore = tx.objectStore('documents');
-      const chunkStore = tx.objectStore('chunks');
-
-      const docsReq = docStore.getAll();
-      const chunksReq = chunkStore.getAll();
-
-      tx.oncomplete = () => {
-        state.localDocs = docsReq.result || [];
-        state.localChunks = chunksReq.result || [];
-        updateLibraryUI();
-        populateDocScopeSelect();
-        resolve();
-      };
-    });
-  }
-
-  function saveLocalDocument(docMeta, chunks) {
-    return new Promise((resolve, reject) => {
-      if (!state.db) return reject('DB not initialized');
-      const tx = state.db.transaction(['documents', 'chunks'], 'readwrite');
-      const docStore = tx.objectStore('documents');
-      const chunkStore = tx.objectStore('chunks');
-
-      docStore.put(docMeta);
-      chunks.forEach((c) => chunkStore.put(c));
-
-      tx.oncomplete = () => {
-        loadLocalData().then(resolve);
-      };
-      tx.onerror = (e) => reject(e);
-    });
-  }
-
-  function deleteLocalDocument(docId) {
-    return new Promise((resolve) => {
-      if (!state.db) return resolve();
-      const tx = state.db.transaction(['documents', 'chunks'], 'readwrite');
-      const docStore = tx.objectStore('documents');
-      const chunkStore = tx.objectStore('chunks');
-
-      docStore.delete(docId);
-      const chunksReq = chunkStore.getAll();
-      chunksReq.onsuccess = () => {
-        const all = chunksReq.result || [];
-        all.forEach((c) => {
-          if (c.docId === docId || c.file === docId) {
-            chunkStore.delete(c.id);
-          }
-        });
-      };
-
-      tx.oncomplete = () => {
-        loadLocalData().then(resolve);
-      };
-    });
-  }
-
-  function clearAllLocalDocuments() {
-    return new Promise((resolve) => {
-      if (!state.db) return resolve();
-      const tx = state.db.transaction(['documents', 'chunks'], 'readwrite');
-      tx.objectStore('documents').clear();
-      tx.objectStore('chunks').clear();
-      tx.oncomplete = () => {
-        loadLocalData().then(resolve);
-      };
-    });
-  }
-
-
-  // --- Fetch Pre-indexed Knowledge Base (Cloud or Repo) ---
-  async function fetchRepoKB() {
-    const targetUrl = state.cloudUrl || 'knowledge_base.json';
-    try {
-      if (targetUrl.includes('drive.google.com') || targetUrl.includes('dropbox.com') || targetUrl.includes('onedrive.live.com') || targetUrl.includes('1drv.ms') || targetUrl.match(/\/folders\//)) {
-        return;
-      }
-
-      const res = await fetch(targetUrl);
-      if (res.ok) {
-        state.repoKB = await res.json();
-        console.log('Loaded knowledge base from:', targetUrl, state.repoKB);
-        updateLibraryUI();
-        populateDocScopeSelect();
-      }
-    } catch (e) {
-      console.warn('Could not load knowledge base from:', targetUrl, e);
+    if (isCompare) {
+      contextStr += 'Instruction: Compare the selected documents in detail regarding the user question.\n\n';
     }
+    contextStr += `User Question: ${userPrompt}\nAnswer strictly based on the excerpts with [1], [2] citations:`;
+    augmentedPrompt = contextStr;
   }
 
-  // --- Fetch Direct Single PDF Link ---
-  async function fetchDirectPdfUrl(urlInput) {
-    if (!urlInput) return false;
-    const updateStatus = (msg, isErr = false) => {
-      if (elements.settingsStatus) {
-        elements.settingsStatus.className = isErr ? 'status-msg error' : 'status-msg';
-        elements.settingsStatus.textContent = msg;
-        elements.settingsStatus.classList.remove('hidden');
-      }
-    };
+  // Prepare Gemini Request
+  const modelName = settings.model || 'gemini-3-flash-preview';
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${settings.apiKey}`;
 
-    let downloadUrl = urlInput.trim();
-    let filename = 'Cloud_Document.pdf';
-    const driveMatch = urlInput.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || urlInput.match(/id=([a-zA-Z0-9_-]+)/);
-
-    if (urlInput.toLowerCase().includes('dropbox.com')) {
-      downloadUrl = urlInput.replace('www.dropbox.com', 'dl.dropboxusercontent.com').replace('?dl=0', '?raw=1');
-      if (!downloadUrl.includes('raw=1') && !downloadUrl.includes('dl=1')) {
-        downloadUrl += (downloadUrl.includes('?') ? '&raw=1' : '?raw=1');
-      }
-      const urlParts = urlInput.split('/');
-      const lastPart = urlParts[urlParts.length - 1].split('?')[0];
-      if (lastPart && lastPart.toLowerCase().endsWith('.pdf')) {
-        filename = decodeURIComponent(lastPart);
-      }
-    } else if (urlInput.toLowerCase().includes('onedrive.live.com') || urlInput.toLowerCase().includes('1drv.ms')) {
-      downloadUrl = urlInput.replace('/redir?', '/download?').replace('/embed?', '/download?');
-    } else if (driveMatch) {
-      const fileId = driveMatch[1];
-      downloadUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
-      filename = `Google_Drive_Code_${fileId.substring(0, 6)}.pdf`;
-    }
-
-    updateStatus(`📥 Downloading & parsing single PDF code...`);
-
-    const fetchUrls = [
-      downloadUrl,
-      `https://corsproxy.io/?${encodeURIComponent(downloadUrl)}`,
-      `https://api.allorigins.win/raw?url=${encodeURIComponent(downloadUrl)}`
-    ];
-
-    for (const pUrl of fetchUrls) {
-      try {
-        const res = await fetch(pUrl);
-        if (res.ok) {
-          const blob = await res.blob();
-          if (blob.size > 500) {
-            const fileObj = new File([blob], filename, { type: 'application/pdf' });
-            const docMeta = await processUploadedFile(fileObj);
-            updateLibraryUI();
-            populateDocScopeSelect();
-            updateStatus(`✅ Successfully imported ${docMeta.filename} (${docMeta.pageCount} pages, ${docMeta.chunkCount} chunks)!`);
-            return true;
-          }
-        }
-      } catch (e) {
-        console.warn('Direct fetch failed:', e);
-      }
-    }
-
-    updateStatus(`❌ Could not fetch single PDF link. Use "Upload Code" button to pick PDFs directly from your device.`, true);
-    return false;
-  }
-
-  // --- Scan Folder Contents & Present Interactive Checklist ---
-  async function scanGoogleDriveFolder(urlOrId) {
-    if (!urlOrId) return [];
-    const updateStatus = (msg, isErr = false) => {
-      if (elements.settingsStatus) {
-        elements.settingsStatus.className = isErr ? 'status-msg error' : 'status-msg';
-        elements.settingsStatus.textContent = msg;
-        elements.settingsStatus.classList.remove('hidden');
-      }
-    };
-
-    if (urlOrId.includes('/file/d/') || urlOrId.endsWith('.pdf')) {
-      return await fetchDirectPdfUrl(urlOrId);
-    }
-
-    updateStatus('🔄 Scanning cloud folder contents...');
-    const fileMap = new Map();
-
-    const folderMatches = Array.from(urlOrId.matchAll(/\/folders\/([a-zA-Z0-9_-]{25,50})/g));
-    let folderIds = folderMatches.map(m => m[1]);
-
-    if (folderIds.length === 0) {
-      const rawIdMatch = urlOrId.trim().match(/^[a-zA-Z0-9_-]{25,50}$/);
-      if (rawIdMatch) folderIds = [rawIdMatch[0]];
-    }
-
-    for (const folderId of folderIds) {
-      let htmlText = '';
-      const proxyUrls = [
-        `https://corsproxy.io/?https://drive.google.com/drive/folders/${folderId}`,
-        `https://api.allorigins.win/raw?url=${encodeURIComponent('https://drive.google.com/drive/folders/' + folderId)}`,
-        `https://corsproxy.io/?https://drive.google.com/embeddedfolderview?id=${folderId}`
-      ];
-
-      for (const pUrl of proxyUrls) {
-        try {
-          const res = await fetch(pUrl);
-          if (res.ok) {
-            const txt = await res.text();
-            if (txt && txt.length > 300) {
-              htmlText += '\n' + txt;
-            }
-          }
-        } catch (e) {}
-      }
-
-      const jsonMatches = Array.from(htmlText.matchAll(/\["([a-zA-Z0-9_-]{25,50})",\s*"([^"\\]+\.(?:pdf|docx|txt|csv|xlsx|md))"/gi));
-      jsonMatches.forEach(m => {
-        if (m[1] && m[2] && !m[2].includes('<') && !m[2].includes('>')) {
-          fileMap.set(m[1], m[2]);
-        }
+  // History payload
+  const contents = [];
+  const currentChat = getActiveChat();
+  if (currentChat && currentChat.messages.length > 0) {
+    // Include last 4 turns for multi-turn context
+    const recent = currentChat.messages.slice(-6);
+    for (const m of recent) {
+      contents.push({
+        role: m.role === 'user' ? 'user' : 'model',
+        parts: [{ text: m.content }]
       });
     }
+  }
+  contents.push({
+    role: 'user',
+    parts: [{ text: augmentedPrompt }]
+  });
 
-    const fileList = Array.from(fileMap.entries()).map(([id, name]) => ({ id, name }));
+  const payload = {
+    contents: contents,
+    systemInstruction: {
+      parts: [{ text: SYSTEM_PROMPT }]
+    },
+    generationConfig: {
+      temperature: 0.2,
+      maxOutputTokens: 3000
+    }
+  };
 
-    if (fileList.length === 0) {
-      return await fetchDirectPdfUrl(urlOrId);
+  isBusy = true;
+  $('sendBtn').disabled = true;
+  $('sendBtn').textContent = '⏹';
+  $('tpsWrap').textContent = 'streaming…';
+  const startTime = performance.now();
+  let totalTokens = 0;
+  let fullResponseText = '';
+
+  abortController = new AbortController();
+
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: abortController.signal
+    });
+
+    if (!resp.ok) {
+      const errJson = await resp.json().catch(() => ({}));
+      const msg = errJson.error?.message || `HTTP ${resp.status} ${resp.statusText}`;
+      throw new Error(msg);
     }
 
-    state.fetchedDriveFiles = fileList;
-    renderDriveChecklist(fileList);
-    updateStatus(`📋 Found ${fileList.length} code(s). Select the specific PDFs you want to parse below.`);
-    return fileList;
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // Keep unfinished line
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const jsonStr = line.replace('data: ', '').trim();
+          if (!jsonStr) continue;
+
+          try {
+            const data = JSON.parse(jsonStr);
+            const candidates = data.candidates || [];
+            if (candidates[0]?.content?.parts) {
+              for (const part of candidates[0].content.parts) {
+                // Filter thought tokens
+                if (part.thought) continue;
+                if (part.text) {
+                  fullResponseText += part.text;
+                  totalTokens += Math.ceil(part.text.length / 4);
+
+                  const elapsed = (performance.now() - startTime) / 1000;
+                  const tps = elapsed > 0 ? (totalTokens / elapsed).toFixed(1) : '0';
+                  $('tpsWrap').textContent = `${tps} tok/s · ${totalTokens} tok`;
+
+                  // Live render markdown
+                  assistantBody.innerHTML = renderMarkdown(fullResponseText);
+                  renderMathInElement(assistantBody);
+                }
+              }
+            }
+          } catch (pe) {
+            console.error('SSE parse error:', pe);
+          }
+        }
+      }
+    }
+
+    // Finalize response
+    if (!fullResponseText) {
+      fullResponseText = 'No text returned by the model.';
+      assistantBody.innerHTML = fullResponseText;
+    } else {
+      assistantBody.innerHTML = renderMarkdown(fullResponseText);
+      renderMathInElement(assistantBody);
+
+      // Append Sources Accordion if excerpts exist
+      if (contextExcerpts.length > 0) {
+        const sourcesHtml = buildSourcesAccordion(contextExcerpts, userPrompt);
+        assistantBody.insertAdjacentHTML('beforeend', sourcesHtml);
+      }
+    }
+
+    // Save to active chat history
+    saveChatMessage('user', userPrompt);
+    saveChatMessage('assistant', fullResponseText, contextExcerpts);
+
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      assistantBody.innerHTML += '<div class="errbox">Generation stopped by user.</div>';
+    } else {
+      assistantBody.innerHTML = `<div class="errbox"><strong>Error:</strong> ${esc(err.message)}</div>`;
+    }
+  } finally {
+    isBusy = false;
+    abortController = null;
+    $('sendBtn').disabled = false;
+    $('sendBtn').textContent = '➤';
+    setTimeout(() => {
+      if (!isBusy) $('tpsWrap').textContent = '';
+    }, 4000);
+  }
+}
+
+// Markdown renderer with clickable citations
+function renderMarkdown(text) {
+  let html = marked.parse(text);
+  // Turn [1], [2] into anchor citations
+  html = html.replace(/\[(\d+)\]/g, '<a class="cite" href="#src-$1">[$1]</a>');
+  return html;
+}
+
+// KaTeX auto-renderer wrapper
+function renderMathInElement(el) {
+  if (window.renderMathInElement) {
+    try {
+      window.renderMathInElement(el, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '$', right: '$', display: false }
+        ],
+        throwOnError: false
+      });
+    } catch (e) {
+      console.warn('KaTeX render error:', e);
+    }
+  }
+}
+
+// Expandable Sources Accordion
+function buildSourcesAccordion(excerpts, query) {
+  const qTokens = tokenize(query);
+
+  let html = `<details class="sources" open>
+    <summary>Sources (${excerpts.length} verified excerpts from selected documents)</summary>`;
+
+  excerpts.forEach((c, idx) => {
+    const srcNum = idx + 1;
+    // Highlight matched query terms
+    let excerptText = esc(c.text);
+    for (const t of qTokens.slice(0, 10)) {
+      if (t.length > 2) {
+        const re = new RegExp(`(${t})`, 'gi');
+        excerptText = excerptText.replace(re, '<mark>$1</mark>');
+      }
+    }
+
+    html += `
+      <div class="src" id="src-${srcNum}">
+        <div class="head">
+          <span>[${srcNum}] ${esc(c.filename)} — ${esc(c.clause || 'General')}${c.page ? ` (p. ${c.page})` : ''}</span>
+          <button onclick="copyExcerptText(this, ${JSON.stringify(c.text)})">Copy</button>
+        </div>
+        <div class="txt">${excerptText}</div>
+      </div>
+    `;
+  });
+
+  html += '</details>';
+  return html;
+}
+
+window.copyExcerptText = (btn, text) => {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+};
+
+function addMessageToUI(role, innerHtml) {
+  const welcome = $('welcome');
+  if (welcome) welcome.remove();
+
+  const chatContainer = $('chat');
+  const msgDiv = document.createElement('div');
+  msgDiv.className = 'msg ' + role;
+  msgDiv.innerHTML = `
+    <div class="avatar">${role === 'user' ? 'You' : 'AI'}</div>
+    <div class="body">${innerHtml}</div>
+  `;
+  chatContainer.appendChild(msgDiv);
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+  return msgDiv.querySelector('.body');
+}
+
+// ----------------------------------------------------
+// Chat Sessions Management (LocalStorage)
+// ----------------------------------------------------
+function loadChats() {
+  try {
+    const saved = localStorage.getItem('researcher_chats');
+    if (saved) {
+      chats = JSON.parse(saved);
+    }
+  } catch (e) {
+    console.error('Failed to load chats:', e);
+    chats = [];
+  }
+  if (!chats || chats.length === 0) {
+    createNewChat();
+  } else {
+    activeChatId = chats[0].id;
+    renderChatList();
+    renderActiveChatMessages();
+  }
+}
+
+function saveChatsToStorage() {
+  try {
+    localStorage.setItem('researcher_chats', JSON.stringify(chats));
+  } catch (e) {
+    console.error('Failed to save chats:', e);
+  }
+}
+
+function createNewChat() {
+  const newId = 'chat_' + Date.now();
+  const chatObj = {
+    id: newId,
+    title: 'New conversation',
+    messages: [],
+    created_at: new Date().toISOString()
+  };
+  chats.unshift(chatObj);
+  activeChatId = newId;
+  saveChatsToStorage();
+  renderChatList();
+  renderActiveChatMessages();
+}
+
+function getActiveChat() {
+  return chats.find(c => c.id === activeChatId) || chats[0];
+}
+
+function saveChatMessage(role, content, sources = []) {
+  const currentChat = getActiveChat();
+  if (!currentChat) return;
+
+  currentChat.messages.push({
+    role,
+    content,
+    sources,
+    timestamp: new Date().toISOString()
+  });
+
+  // Set chat title from first user query
+  if (currentChat.messages.length === 2 && currentChat.title === 'New conversation') {
+    const firstUserMsg = currentChat.messages.find(m => m.role === 'user');
+    if (firstUserMsg) {
+      currentChat.title = firstUserMsg.content.slice(0, 32) + (firstUserMsg.content.length > 32 ? '…' : '');
+    }
   }
 
-  function renderDriveChecklist(files) {
-    if (!elements.driveFilesList || !elements.driveFilesContainer) return;
-    elements.driveFilesList.innerHTML = files.map(f => `
-      <label class="doc-item" style="cursor: pointer; display: flex; gap: 0.5rem; align-items: center;">
-        <input type="checkbox" class="drive-file-cb" data-id="${f.id}" data-name="${f.name}" checked>
-        <span class="doc-name">📄 ${f.name}</span>
-      </label>
-    `).join('');
-    elements.driveFilesContainer.classList.remove('hidden');
+  saveChatsToStorage();
+  renderChatList();
+}
+
+function renderChatList() {
+  const container = $('chatList');
+  container.innerHTML = '';
+
+  for (const c of chats) {
+    const item = document.createElement('div');
+    item.className = 'chatItem' + (c.id === activeChatId ? ' active' : '');
+    item.onclick = () => switchChat(c.id);
+    item.innerHTML = `
+      <span class="t" title="${esc(c.title)}">${esc(c.title)}</span>
+      <button title="Delete conversation" onclick="event.stopPropagation(); deleteChat('${c.id}')">✕</button>
+    `;
+    container.appendChild(item);
+  }
+}
+
+function switchChat(chatId) {
+  if (isBusy) {
+    alert('Please wait for the current response to finish or stop generation.');
+    return;
+  }
+  activeChatId = chatId;
+  renderChatList();
+  renderActiveChatMessages();
+}
+
+function deleteChat(chatId) {
+  if (!confirm('Delete this conversation?')) return;
+  chats = chats.filter(c => c.id !== chatId);
+  if (chats.length === 0) {
+    createNewChat();
+  } else {
+    if (activeChatId === chatId) {
+      activeChatId = chats[0].id;
+    }
+    saveChatsToStorage();
+    renderChatList();
+    renderActiveChatMessages();
+  }
+}
+
+function renderActiveChatMessages() {
+  const chatContainer = $('chat');
+  chatContainer.innerHTML = '';
+
+  const currentChat = getActiveChat();
+  if (!currentChat || currentChat.messages.length === 0) {
+    chatContainer.innerHTML = `
+      <div id="welcome">
+        <h2>Chat with your codes &amp; standards</h2>
+        <p>Upload documents on the left, then ask anything. Answers cite the exact source and page.</p>
+        <div class="hint" onclick="useHint(this)">What is the design factor for restrained pipelines?</div>
+        <div class="hint" onclick="useHint(this)">Summarize the hydrotest requirements across my documents.</div>
+        <div class="hint" onclick="useHint(this)">Which clause covers welding qualification for duplex stainless?</div>
+      </div>
+    `;
+    return;
   }
 
-  async function importSelectedDriveFiles() {
-    const cbs = document.querySelectorAll('.drive-file-cb:checked');
-    if (!cbs || cbs.length === 0) {
-      alert('Please select at least one code to import.');
+  for (const m of currentChat.messages) {
+    let bodyHtml = renderMarkdown(m.content);
+    if (m.sources && m.sources.length > 0) {
+      bodyHtml += buildSourcesAccordion(m.sources, '');
+    }
+    const msgDiv = document.createElement('div');
+    msgDiv.className = 'msg ' + m.role;
+    msgDiv.innerHTML = `
+      <div class="avatar">${m.role === 'user' ? 'You' : 'AI'}</div>
+      <div class="body">${bodyHtml}</div>
+    `;
+    chatContainer.appendChild(msgDiv);
+    renderMathInElement(msgDiv);
+  }
+
+  chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+window.useHint = el => {
+  $('input').value = el.textContent.trim();
+  $('input').focus();
+};
+
+// ----------------------------------------------------
+// UI Controls & Settings Modal
+// ----------------------------------------------------
+function openSettingsModal() {
+  $('s_key').value = settings.apiKey || '';
+  $('s_model').value = settings.model || 'gemini-3-flash-preview';
+  $('s_topk').value = settings.topK || 6;
+  $('s_vw').value = settings.vectorWeight || 0.5;
+  $('chatTest').textContent = '';
+  $('modalBg').classList.add('open');
+}
+
+function closeSettingsModal() {
+  $('modalBg').classList.remove('open');
+}
+
+async function testGeminiConnection() {
+  const key = $('s_key').value.trim();
+  const testLine = $('chatTest');
+  testLine.className = 'testline';
+  testLine.textContent = 'Testing connection & fetching models…';
+
+  if (!key) {
+    testLine.className = 'testline bad';
+    testLine.textContent = 'Error: Please enter an API key.';
+    return;
+  }
+
+  try {
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`);
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      throw new Error(data.error?.message || `HTTP ${resp.status}`);
+    }
+
+    testLine.className = 'testline ok';
+    testLine.textContent = 'Connected! API Key is valid.';
+    $('chatDot').className = 'dot ok';
+    $('chatStatus').textContent = 'AI connected';
+
+    // Populate model datalist & select
+    const datalist = $('modelList');
+    const select = $('s_modelSelect');
+    datalist.innerHTML = '';
+    select.innerHTML = '<option value="">Select fetched model…</option>';
+
+    const geminiModels = (data.models || []).filter(m => m.supportedGenerationMethods?.includes('generateContent'));
+    for (const m of geminiModels) {
+      const cleanName = m.name.replace('models/', '');
+      const opt = document.createElement('option');
+      opt.value = cleanName;
+      datalist.appendChild(opt);
+
+      const selOpt = document.createElement('option');
+      selOpt.value = cleanName;
+      selOpt.textContent = cleanName;
+      select.appendChild(selOpt);
+    }
+  } catch (err) {
+    testLine.className = 'testline bad';
+    testLine.textContent = 'Connection failed: ' + err.message;
+    $('chatDot').className = 'dot bad';
+    $('chatStatus').textContent = 'AI offline — check Settings';
+  }
+}
+
+// ----------------------------------------------------
+// Event Listeners & Bootstrapping
+// ----------------------------------------------------
+document.addEventListener('DOMContentLoaded', () => {
+  loadSettings();
+  loadChats();
+  initializeLibrary();
+
+  // Status check
+  if (settings.apiKey) {
+    $('chatDot').className = 'dot ok';
+    $('chatStatus').textContent = 'AI connected';
+  } else {
+    $('chatDot').className = 'dot bad';
+    $('chatStatus').textContent = 'AI offline — click Settings';
+  }
+
+  // Gear & Settings Modal
+  $('gearBtn').onclick = openSettingsModal;
+  $('cancelBtn').onclick = closeSettingsModal;
+  $('saveBtn').onclick = () => {
+    settings.apiKey = $('s_key').value.trim();
+    settings.model = $('s_model').value.trim() || 'gemini-3-flash-preview';
+    settings.topK = parseInt($('s_topk').value, 10) || 6;
+    settings.vectorWeight = parseFloat($('s_vw').value) || 0.5;
+    saveSettings();
+    closeSettingsModal();
+    if (settings.apiKey) {
+      $('chatDot').className = 'dot ok';
+      $('chatStatus').textContent = 'AI connected';
+    }
+  };
+
+  $('testChatBtn').onclick = testGeminiConnection;
+  $('s_modelSelect').onchange = () => {
+    if ($('s_modelSelect').value) {
+      $('s_model').value = $('s_modelSelect').value;
+    }
+  };
+
+  // Chat Actions
+  $('newChat').onclick = createNewChat;
+
+  // Selection Bar Actions
+  $('selAll').onclick = () => selectAll(true);
+  $('selNone').onclick = () => selectAll(false);
+  $('clearAll').onclick = clearLocalDocs;
+
+  // Mobile Drawer
+  const mobileMenuBtn = $('mobileMenuBtn');
+  const sidebar = $('sidebar');
+  const overlay = $('mobileOverlay');
+
+  mobileMenuBtn.onclick = () => {
+    sidebar.classList.toggle('open');
+    overlay.classList.toggle('open');
+  };
+  overlay.onclick = () => {
+    sidebar.classList.remove('open');
+    overlay.classList.remove('open');
+  };
+
+  // Send & Input handling
+  const inputEl = $('input');
+  const sendBtn = $('sendBtn');
+
+  const handleSend = () => {
+    if (isBusy) {
+      if (abortController) abortController.abort();
       return;
     }
+    const val = inputEl.value.trim();
+    if (!val) return;
+    streamChatResponse(val);
+  };
 
-    const selectedFiles = Array.from(cbs).map(cb => ({
-      id: cb.getAttribute('data-id'),
-      name: cb.getAttribute('data-name')
-    }));
+  sendBtn.onclick = handleSend;
 
-    const updateStatus = (msg) => {
-      if (elements.settingsStatus) {
-        elements.settingsStatus.className = 'status-msg';
-        elements.settingsStatus.textContent = msg;
-        elements.settingsStatus.classList.remove('hidden');
-      }
-    };
-
-    updateStatus(`📥 Downloading & parsing ${selectedFiles.length} selected document(s)...`);
-    let successCount = 0;
-
-    for (let i = 0; i < selectedFiles.length; i++) {
-      const item = selectedFiles[i];
-      updateStatus(`📥 Parsing (${i + 1}/${selectedFiles.length}): ${item.name}...`);
-      const downloadUrls = [
-        `https://drive.usercontent.google.com/download?id=${item.id}&export=download`,
-        `https://corsproxy.io/?https://drive.google.com/uc?export=download&id=${item.id}`,
-        `https://api.allorigins.win/raw?url=${encodeURIComponent('https://drive.google.com/uc?export=download&id=' + item.id)}`
-      ];
-
-      for (const dUrl of downloadUrls) {
-        try {
-          const fileRes = await fetch(dUrl);
-          if (fileRes.ok) {
-            const blob = await fileRes.blob();
-            if (blob.size > 500) {
-              const fileObj = new File([blob], item.name, { type: 'application/pdf' });
-              await processUploadedFile(fileObj);
-              successCount++;
-              break;
-            }
-          }
-        } catch (err) {}
-      }
+  inputEl.onkeydown = e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
     }
-
-    updateLibraryUI();
-    populateDocScopeSelect();
-    updateStatus(`✅ Successfully imported ${successCount} selected code(s)!`);
-  }
-
-  // --- Populate Code Scope Selector Dropdown ---
-  function populateDocScopeSelect() {
-    if (!elements.docScopeSelect) return;
-    const currentScope = elements.docScopeSelect.value || 'all';
-    elements.docScopeSelect.innerHTML = '<option value="all">🌐 All Codes & Standards</option>';
-
-    const repoDocs = state.repoKB.documents || [];
-    repoDocs.forEach(d => {
-      const opt = document.createElement('option');
-      opt.value = d.filename;
-      opt.textContent = `📄 ${d.filename}`;
-      if (d.filename === currentScope) opt.selected = true;
-      elements.docScopeSelect.appendChild(opt);
-    });
-
-    state.localDocs.forEach(d => {
-      const opt = document.createElement('option');
-      opt.value = d.filename;
-      opt.textContent = `📱 ${d.filename}`;
-      if (d.filename === currentScope) opt.selected = true;
-      elements.docScopeSelect.appendChild(opt);
-    });
-  }
-
-  // --- Tokenizer & BM25 Scoring ---
-  function tokenize(text) {
-    if (!text) return [];
-    // Extract standard technical clauses and tokens, preserving dots, hyphens, and colons (e.g. 304.1.2, UG-27, ISO 9001:2015)
-    return text.toLowerCase().match(/[a-z0-9]+(?:[\.\-_:][a-z0-9]+)*/gi) || [];
-  }
-
-  function scoreBM25(queryTokens, chunkTokens) {
-    if (!queryTokens.length || !chunkTokens.length) return 0;
-    const chunkTokenMap = {};
-    chunkTokens.forEach((t) => (chunkTokenMap[t] = (chunkTokenMap[t] || 0) + 1));
-    let score = 0;
-    queryTokens.forEach((qt) => {
-      if (chunkTokenMap[qt]) {
-        // Boost technical clause tokens with numbers, dots or dashes
-        const weight = qt.includes('.') || qt.includes('-') || qt.length > 5 ? 3.0 : 1.5;
-        score += chunkTokenMap[qt] * weight;
-      }
-    });
-    return score;
-  }
-
-  // --- Vector Cosine Similarity ---
-  function cosineSimilarity(vecA, vecB) {
-    if (!vecA || !vecB || vecA.length !== vecB.length || vecA.length === 0) return 0;
-    let dot = 0, normA = 0, normB = 0;
-    for (let i = 0; i < vecA.length; i++) {
-      dot += vecA[i] * vecB[i];
-      normA += vecA[i] * vecA[i];
-      normB += vecB[i] * vecB[i];
-    }
-    return dot / (Math.sqrt(normA) * Math.sqrt(normB) + 1e-9);
-  }
-
-  let localBrowserEmbedder = null;
-  async function getLocalBrowserEmbedder() {
-    if (localBrowserEmbedder) return localBrowserEmbedder;
-    if (window.transformers && window.transformers.pipeline) {
-      try {
-        console.log('Loading free client-side browser embedding model (Xenova/bge-small-en-v1.5)...');
-        localBrowserEmbedder = await window.transformers.pipeline('feature-extraction', 'Xenova/bge-small-en-v1.5');
-        return localBrowserEmbedder;
-      } catch (e) {
-        console.warn('Transformers.js client pipeline error:', e);
-      }
-    }
-    return null;
-  }
-
-  // --- Embeddings & Chat ---
-  async function fetchQueryEmbedding(query) {
-    // 1. Try free Transformers.js browser embedding
-    const localEmbedder = await getLocalBrowserEmbedder();
-    if (localEmbedder) {
-      try {
-        const out = await localEmbedder(query, { pooling: 'mean', normalize: true });
-        return Array.from(out.data);
-      } catch (e) {
-        console.warn('Client browser embedding computation failed:', e);
-      }
-    }
-
-    // 2. Fallback to Gemini API if key is present
-    if (state.apiKey) {
-      const models = ['gemini-embedding-2', 'text-embedding-004'];
-
-      for (const model of models) {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent`;
-        try {
-          const res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
-            body: JSON.stringify({
-              model: `models/${model}`,
-              content: { parts: [{ text: query.substring(0, 8000) }] }
-            })
-          });
-          if (res.ok) {
-            const data = await res.json();
-            const vals = data.embedding?.values;
-            if (vals && vals.length > 0) {
-              return vals;
-            }
-          }
-        } catch (e) {
-          console.warn(`Embedding failed for ${model}:`, e);
-        }
-      }
-    }
-
-    return null;
-  }
-
-
-  async function streamGeminiChat(userPrompt, retrievedChunks, docScope = 'all', onDelta = null) {
-    if (!state.apiKey) {
-      throw new Error('Please set your Gemini API key in Settings first.');
-    }
-
-    const selectedModel = state.model || (elements.chatModelSelect && elements.chatModelSelect.value) || (elements.modelSelect && elements.modelSelect.value) || 'gemini-3-flash-preview';
-    const fallbackList = ['gemini-3-flash-preview', 'gemini-3.7-flash', 'gemini-3.8-flash', 'gemma-4-31b-it'];
-    const modelsToTry = [selectedModel, ...fallbackList].filter((m, i, arr) => m && arr.indexOf(m) === i && !m.includes('2.5'));
-
-    let lastError = null;
-
-    let srcText = '';
-    if (retrievedChunks && retrievedChunks.length > 0) {
-      srcText = retrievedChunks.map((c, i) => {
-        const loc = c.page ? `Page ${c.page}${c.clause ? ', ' + c.clause : ''}` : (c.clause || '');
-        return `[${i + 1}] (${c.file}${loc ? ', ' + loc : ''})\n${c.text}`;
-      }).join('\n\n---\n\n');
-    } else {
-      srcText = '(no matching excerpts found in the library)';
-    }
-
-    const scopeNote = (docScope && docScope !== 'all') ? `\n\nFocus specifically on the document: "${docScope}".` : '';
-
-    const systemInstruction = `You are an expert engineering assistant with deep knowledge of codes, standards, and engineering practice. You answer questions using excerpts retrieved from the user's document library, shown in SOURCES below.${scopeNote}
-
-How to answer:
-1. Start with a direct answer to the question.
-2. Then EXPLAIN it properly: what it means in practice, why the requirement exists where evident, what conditions/exceptions apply, and how the pieces relate. Do not just quote fragments back — interpret and synthesize them like a senior engineer explaining to a colleague.
-3. Combine information across multiple sources when they cover the same topic; point out when sources differ or when a requirement in one place is modified by another.
-4. Quote exact clause numbers, values, formulas, tolerances, and table data when present. Never invent clause numbers or values.
-5. Cite sources inline with bracketed numbers, e.g. [1] or [2][3], so the user can verify.
-6. If the sources only partially answer the question, answer what you can from them, then clearly separate any additional general engineering knowledge with "(general knowledge, not from your documents)". If the sources contain nothing relevant, say so plainly.
-7. Use markdown (headings, tables, lists) when it makes the answer clearer.
-
-SOURCES:
-${srcText}`;
-
-    // Multi-turn conversation contents:
-    const contents = [];
-    const recentTurns = (state.chatHistory || []).slice(-8);
-    for (const turn of recentTurns) {
-      contents.push({
-        role: turn.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: turn.content }]
-      });
-    }
-
-    // Current user prompt
-    contents.push({
-      role: 'user',
-      parts: [{ text: userPrompt }]
-    });
-
-    const isDeepReasoning = elements.deepReasoningToggle ? elements.deepReasoningToggle.checked : true;
-
-    for (const modelName of modelsToTry) {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${state.apiKey}`;
-
-      const generationConfig = {
-        temperature: 0.2,
-        maxOutputTokens: 8192
-      };
-
-      const body = {
-        contents,
-        systemInstruction: { parts: [{ text: systemInstruction }] },
-        generationConfig
-      };
-
-      try {
-        let res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
-          body: JSON.stringify(body)
-        });
-
-        // If thinkingConfig causes 400 Bad Request on an unsupported model, retry without it
-        if (res.status === 400 && generationConfig.thinkingConfig) {
-          delete body.generationConfig.thinkingConfig;
-          res = await fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'x-goog-api-key': state.apiKey },
-            body: JSON.stringify(body)
-          });
-        }
-
-        if (!res.ok) {
-          const errJson = await res.json().catch(() => ({}));
-          lastError = new Error(errJson.error?.message || `HTTP ${res.status}`);
-          console.warn(`Model ${modelName} stream call failed:`, lastError);
-          continue;
-        }
-
-        let fullText = '';
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let buffer = '';
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split('\n');
-          buffer = lines.pop(); // keep remainder
-
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const jsonStr = line.slice(6).trim();
-              if (!jsonStr) continue;
-              try {
-                const data = JSON.parse(jsonStr);
-                const parts = data.candidates?.[0]?.content?.parts || [];
-                for (const part of parts) {
-                  if (part.thought) continue;
-                  let t = part.text || '';
-                  t = t.replace(/<think>[\s\S]*?(<\/think>|$)/g, '').replace(/<thought>[\s\S]*?(<\/thought>|$)/g, '');
-                  if (t) {
-                    fullText += t;
-                    if (onDelta) onDelta(t, fullText);
-                  }
-                }
-              } catch (parseErr) {}
-            }
-          }
-        }
-
-        if (fullText) {
-          if (modelName !== selectedModel) {
-            fullText += `\n\n*(Note: Requested model \`${selectedModel}\` was unavailable; response generated via fallback \`${modelName}\`)*`;
-          }
-          return { answer: fullText, modelUsed: modelName };
-        }
-      } catch (e) {
-        lastError = e;
-      }
-    }
-
-    throw lastError || new Error('Failed to communicate with Gemini API.');
-  }
-
-
-  // --- Continuous Context Neighbor Expansion (matching offline app rag.py) ---
-  function expandChunkWithNeighbors(chunk, allChunks, maxChars = 3500) {
-    if (!chunk || !chunk.text) return '';
-    let text = chunk.text;
-    if (text.length >= maxChars) return text.substring(0, maxChars);
-
-    const chunkFile = chunk.file || '';
-    const m = String(chunk.id || '').match(/^(.*?)_(\d+)$/);
-    const idx = m ? parseInt(m[2], 10) : (chunk.chunkIndex != null ? chunk.chunkIndex : null);
-    const prefix = m ? m[1] : chunkFile;
-
-    if (idx !== null) {
-      const budget = maxChars - text.length;
-      if (budget > 300) {
-        const nextChunk = allChunks.find(c =>
-          c.id === `${prefix}_${idx + 1}` ||
-          (c.file === chunkFile && c.chunkIndex === idx + 1)
-        );
-        const prevChunk = allChunks.find(c =>
-          c.id === `${prefix}_${idx - 1}` ||
-          (c.file === chunkFile && c.chunkIndex === idx - 1)
-        );
-        const halfBudget = Math.floor(budget / 2);
-        if (nextChunk && nextChunk.text) {
-          text = text + "\n\n" + nextChunk.text.substring(0, halfBudget);
-        }
-        if (prevChunk && prevChunk.text) {
-          text = prevChunk.text.slice(-halfBudget) + "\n\n" + text;
-        }
-      }
-    }
-    return text.substring(0, maxChars);
-  }
-
-  // --- Hybrid Retriever (RRF fused BM25 + Vector Search with Neighbor Expansion) ---
-  async function performHybridSearch(query, topK = 8, docScope = 'all') {
-    const qTokens = tokenize(query);
-    let queryVec = null;
-    try {
-      queryVec = await fetchQueryEmbedding(query);
-    } catch (e) {
-      queryVec = null;
-    }
-
-    let allChunks = [];
-    if (state.activeFilter === 'all' || state.activeFilter === 'repo') {
-      allChunks = allChunks.concat(state.repoKB.chunks || []);
-    }
-    if (state.activeFilter === 'all' || state.activeFilter === 'local') {
-      allChunks = allChunks.concat(state.localChunks || []);
-    }
-
-    if (docScope && docScope !== 'all') {
-      allChunks = allChunks.filter(c => c.file === docScope || c.docId === docScope);
-    }
-
-    if (allChunks.length === 0) return [];
-
-    // Check dimension compatibility to avoid silent 0-score bug
-    const sampleChunk = allChunks.find(c => c.embedding && Array.isArray(c.embedding) && c.embedding.length > 0);
-    const hasDimMismatch = (queryVec && sampleChunk && queryVec.length !== sampleChunk.embedding.length);
-
-    // 1. BM25 keyword rankings
-    const bm25List = allChunks.map(chunk => ({
-      chunk,
-      score: scoreBM25(qTokens, chunk.tokens || tokenize(chunk.text))
-    })).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
-
-    // 2. Vector semantic rankings
-    let vecList = [];
-    if (queryVec && !hasDimMismatch) {
-      vecList = allChunks.map(chunk => {
-        let vecScore = 0;
-        if (chunk.embedding && queryVec.length === chunk.embedding.length) {
-          vecScore = cosineSimilarity(queryVec, chunk.embedding);
-        }
-        return { chunk, score: vecScore };
-      }).filter(x => x.score > 0.3).sort((a, b) => b.score - a.score);
-    }
-
-    // 3. Reciprocal Rank Fusion (RRF) matching offline store.py (vector_weight = 0.6)
-    const K = 60.0;
-    const vectorWeight = 0.6;
-    const fusedScores = new Map();
-    const chunkMap = new Map();
-
-    bm25List.slice(0, 40).forEach((item, rank) => {
-      const cid = item.chunk.id || `${item.chunk.file}_${item.chunk.page}_${rank}`;
-      chunkMap.set(cid, item.chunk);
-      fusedScores.set(cid, (fusedScores.get(cid) || 0) + (1 - vectorWeight) / (K + rank + 1));
-    });
-
-    vecList.slice(0, 40).forEach((item, rank) => {
-      const cid = item.chunk.id || `${item.chunk.file}_${item.chunk.page}_${rank}`;
-      chunkMap.set(cid, item.chunk);
-      fusedScores.set(cid, (fusedScores.get(cid) || 0) + vectorWeight / (K + rank + 1));
-    });
-
-    let rankedEntries = Array.from(fusedScores.entries()).sort((a, b) => b[1] - a[1]).slice(0, topK);
-
-    let topHits = rankedEntries.map(([cid, score]) => {
-      const chunk = chunkMap.get(cid);
-      return {
-        ...chunk,
-        text: expandChunkWithNeighbors(chunk, allChunks, 3500),
-        score
-      };
-    });
-
-    // Fallback: if broad question yields no specific keyword hits, return leading chunks (scope, table of contents, introduction)
-    if (topHits.length === 0 && allChunks.length > 0) {
-      topHits = allChunks.slice(0, Math.min(topK, 8)).map((c) => ({
-        ...c,
-        text: expandChunkWithNeighbors(c, allChunks, 3500),
-        score: 0.1
-      }));
-    }
-
-    return topHits;
-  }
-
-  // --- Client-Side File Processing (PDF / DOCX / TXT) ---
-  async function processUploadedFile(file) {
-    const filename = file.name;
-    const ext = filename.split('.').pop().toLowerCase();
-    let pages = [];
-
-    try {
-      if (ext === 'pdf') {
-        pages = await parsePdfFile(file);
-      } else if (ext === 'docx' || ext === 'doc') {
-        pages = await parseDocxFile(file);
-      } else {
-        const text = await file.text();
-        pages = [{ page: 1, text }];
-      }
-    } catch (e) {
-      console.warn(`Direct parser failed for ${filename}, falling back to plain text reader:`, e);
-      try {
-        const text = await file.text();
-        pages = [{ page: 1, text }];
-      } catch (err) {
-        throw new Error(`Could not parse ${filename}: ${err.message}`);
-      }
-    }
-
-    const docId = `local_${Date.now()}_${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-    const chunks = [];
-    let chunkIdCounter = 0;
-
-    for (const pageInfo of pages) {
-      const pageNum = pageInfo.page;
-      const text = pageInfo.text || '';
-      if (!text.trim()) continue;
-
-      const chunkSize = 1800;
-      const overlap = 200;
-      let start = 0;
-
-      while (start < text.length) {
-        const chunkStr = text.slice(start, start + chunkSize).trim();
-        if (chunkStr) {
-          const clauseMatch = chunkStr.match(/(?:(?:para|section|clause|article|part)\s+[\d\.]+|[\d]+\.[\d]+(?:\.[\d]+)?)/i);
-          const clause = clauseMatch ? clauseMatch[0] : `Page ${pageNum}`;
-
-          chunks.push({
-            id: `${docId}_c${chunkIdCounter++}`,
-            docId: docId,
-            file: filename,
-            page: pageNum,
-            clause,
-            text: chunkStr,
-            tokens: tokenize(chunkStr),
-            embedding: null
-          });
-        }
-        start += (chunkSize - overlap);
-      }
-    }
-
-    const docMeta = {
-      id: docId,
-      filename,
-      pageCount: pages.length,
-      chunkCount: chunks.length,
-      uploadedAt: new Date().toISOString()
-    };
-
-    // Save immediately into IndexedDB so the document is READY TO CHAT & SEARCH IN < 1 SECOND!
-    await saveLocalDocument(docMeta, chunks);
-    updateLibraryUI();
-    populateDocScopeSelect();
-
-    // Progress banner feedback
-    const progressBanner = document.getElementById('embedding-progress-banner');
-    const progressStatusMsg = document.getElementById('progress-status-msg');
-    const progressPercent = document.getElementById('progress-percent');
-    const progressBarFill = document.getElementById('progress-bar-fill');
-
-    if (progressBanner) {
-      progressBanner.classList.remove('hidden');
-      if (progressStatusMsg) progressStatusMsg.textContent = `⚡ Document indexed! Ready for instant search & chat (${filename})`;
-      if (progressPercent) progressPercent.textContent = `100%`;
-      if (progressBarFill) progressBarFill.style.width = `100%`;
-      setTimeout(() => {
-        progressBanner.classList.add('hidden');
-      }, 1800);
-    }
-
-    return docMeta;
-  }
-
-
-  async function parsePdfFile(file) {
-    const arrayBuffer = await file.arrayBuffer();
-    const pages = [];
-
-    if (window.pdfjsLib) {
-      try {
-        const loadingTask = pdfjsLib.getDocument({
-          data: arrayBuffer,
-          cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
-          cMapPacked: true
-        });
-        const pdf = await loadingTask.promise;
-        for (let i = 1; i <= pdf.numPages; i++) {
-          try {
-            const page = await pdf.getPage(i);
-            const content = await page.getTextContent();
-            const text = content.items.map(item => item.str).join(' ');
-            if (text.trim()) {
-              pages.push({ page: i, text: text.trim() });
-            }
-          } catch (err) {
-            console.warn(`Page ${i} text extraction warning:`, err);
-          }
-        }
-      } catch (e) {
-        console.warn('PDF.js primary parser failed:', e);
-      }
-    }
-
-    if (pages.length > 0) return pages;
-
-    // Fallback: Direct PDF stream text decoder
-    try {
-      const decoder = new TextDecoder('utf-8');
-      const rawText = decoder.decode(arrayBuffer);
-      const textMatches = Array.from(rawText.matchAll(/\(([^()]{3,1000})\)\s*Tj/g));
-      const extractedStr = textMatches.map(m => m[1]).join(' ');
-      if (extractedStr.trim().length > 100) {
-        return [{ page: 1, text: extractedStr }];
-      }
-    } catch (err) {}
-
-    return [{ page: 1, text: 'PDF Document content extracted.' }];
-  }
-
-  async function parseDocxFile(file) {
-    if (window.mammoth) {
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const result = await mammoth.extractRawText({ arrayBuffer });
-        const fullText = (result.value || '').trim();
-        if (fullText) {
-          const chunkSize = 1000;
-          const pages = [];
-          let p = 1;
-          for (let i = 0; i < fullText.length; i += chunkSize) {
-            pages.push({ page: p++, text: fullText.slice(i, i + chunkSize) });
-          }
-          return pages;
-        }
-      } catch (e) {
-        console.warn('Mammoth docx extraction failed, using text fallback:', e);
-      }
-    }
-    try {
-      const text = await file.text();
-      const cleanText = text.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ' ').trim();
-      return [{ page: 1, text: cleanText }];
-    } catch (err) {
-      return [{ page: 1, text: '' }];
-    }
-  }
-
-  // --- UI Renderers & Handlers ---
-  function updateLibraryUI() {
-    const repoDocs = state.repoKB.documents || [];
-    const totalCount = repoDocs.length + state.localDocs.length;
-    if (elements.libCount) elements.libCount.textContent = totalCount;
-
-    if (elements.repoDocsList) {
-      if (repoDocs.length === 0) {
-        elements.repoDocsList.innerHTML = '<p class="doc-meta">No pre-indexed standards in repo or cloud yet.</p>';
-      } else {
-        elements.repoDocsList.innerHTML = repoDocs.map(d => `
-          <div class="doc-item">
-            <div>
-              <div class="doc-name">📄 ${d.filename}</div>
-              <div class="doc-meta">${d.chunk_count} chunks • ${d.page_count} pages</div>
-            </div>
-            <span class="pill">Cloud/Repo</span>
-          </div>
-        `).join('');
-      }
-    }
-
-    if (elements.localDocsList) {
-      if (state.localDocs.length === 0) {
-        elements.localDocsList.innerHTML = '<p class="doc-meta">No local documents uploaded yet.</p>';
-      } else {
-        const totalLocalChunks = state.localDocs.reduce((acc, d) => acc + (d.chunkCount || 0), 0);
-        elements.localDocsList.innerHTML = `
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
-            <span class="doc-meta" style="font-weight:600;">${state.localDocs.length} local document(s) • ${totalLocalChunks} chunks</span>
-            <button id="btn-clear-all-local" class="btn-text-only" style="color:var(--bad, #e0635c); font-size:0.8rem; cursor:pointer;" type="button">🗑️ Clear All</button>
-          </div>
-        ` + state.localDocs.map(d => `
-          <div class="doc-item">
-            <div>
-              <div class="doc-name">📱 ${d.filename}</div>
-              <div class="doc-meta">${d.chunkCount} chunks • ${d.pageCount} pages</div>
-            </div>
-            <button class="btn-text-only btn-del-doc" data-id="${d.id}">🗑️</button>
-          </div>
-        `).join('');
-
-        const clearBtn = document.getElementById('btn-clear-all-local');
-        if (clearBtn) {
-          clearBtn.addEventListener('click', async () => {
-            if (confirm('Are you sure you want to clear all uploaded local documents?')) {
-              await clearAllLocalDocuments();
-            }
-          });
-        }
-
-        document.querySelectorAll('.btn-del-doc').forEach(btn => {
-          btn.addEventListener('click', (e) => {
-            const docId = e.currentTarget.getAttribute('data-id');
-            deleteLocalDocument(docId);
-          });
-        });
-      }
-    }
-
-  }
-
-  function escapeHtml(str) {
-    if (!str) return '';
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
-  }
-
-  function buildExcerptsDrawerHtml(citations) {
-    if (!citations || !citations.length) return '';
-    return `
-      <details class="sources-drawer" open>
-        <summary class="sources-summary">📄 ${citations.length} Source Excerpt${citations.length > 1 ? 's' : ''} (click to collapse)</summary>
-        <div class="citations-list">
-          ${citations.map((c, i) => {
-            const loc = c.page ? `Page ${c.page}${c.clause ? ', ' + escapeHtml(c.clause) : ''}` : escapeHtml(c.clause || '');
-            const head = `[${i + 1}] ${escapeHtml(c.file)}${loc ? ' — ' + loc : ''}`;
-            return `
-              <div class="excerpt-card" id="source-card-${i + 1}" data-index="${i + 1}">
-                <div class="excerpt-header">
-                  <span class="excerpt-title">${head}</span>
-                  <button type="button" class="btn-copy-excerpt" title="Copy excerpt to clipboard">📋 Copy</button>
-                </div>
-                <div class="excerpt-text">${escapeHtml(c.text)}</div>
-              </div>
-            `;
-          }).join('')}
-        </div>
-      </details>
-    `;
-  }
-
-  function renderFormattedContent(container, markdownText) {
-    if (!container) return;
-    if (window.marked) {
-      // Process citations into interactive badges
-      let processed = (markdownText || '').replace(/\[(?:Source\s*)?(\d{1,2})\]/gi, (match, num) => {
-        return `<a class="citation-pill" data-source-index="${num}" href="javascript:void(0);" title="Jump to Source [${num}]">[${num}]</a>`;
-      });
-
-      let html = marked.parse(processed);
-      container.innerHTML = html;
-
-      // Wrap tables for responsive horizontal scrolling on mobile
-      container.querySelectorAll('table').forEach(tbl => {
-        if (!tbl.parentElement.classList.contains('table-responsive')) {
-          const wrapper = document.createElement('div');
-          wrapper.className = 'table-responsive';
-          tbl.parentNode.insertBefore(wrapper, tbl);
-          wrapper.appendChild(tbl);
-        }
-      });
-
-      // Render math formulas with KaTeX
-      if (window.renderMathInElement) {
-        try {
-          renderMathInElement(container, {
-            delimiters: [
-              { left: '$$', right: '$$', display: true },
-              { left: '$', right: '$', display: false },
-              { left: '\\(', right: '\\)', display: false },
-              { left: '\\[', right: '\\]', display: true }
-            ],
-            throwOnError: false
-          });
-        } catch (e) {
-          console.warn('KaTeX math rendering warning:', e);
-        }
-      }
-    } else {
-      container.textContent = markdownText;
-    }
-  }
-
-  function renderMessage(role, text, citations = [], modelBadge = '') {
-    const msgDiv = document.createElement('div');
-    msgDiv.className = `message ${role === 'user' ? 'user-message' : 'system-message'}`;
-
-    const avatar = document.createElement('div');
-    avatar.className = 'message-avatar';
-    avatar.textContent = role === 'user' ? '👤' : '⚡';
-
-    const body = document.createElement('div');
-    body.className = 'message-body';
-
-    if (role === 'assistant') {
-      renderFormattedContent(body, text);
-    } else {
-      body.textContent = text;
-    }
-
-    if (citations && citations.length > 0) {
-      const citationsWrapper = document.createElement('div');
-      citationsWrapper.className = 'citations-wrapper';
-      citationsWrapper.innerHTML = buildExcerptsDrawerHtml(citations);
-      body.appendChild(citationsWrapper);
-    }
-
-    if (modelBadge && role === 'assistant') {
-      const badgeDiv = document.createElement('div');
-      badgeDiv.style.cssText = 'font-size: 11px; color: #64748b; margin-top: 6px; font-family: monospace; display: flex; align-items: center; gap: 4px; border-top: 1px solid #334155; padding-top: 4px;';
-      badgeDiv.innerHTML = `⚡ Engine Model: <strong style="color:#3b82f6;">${modelBadge}</strong>`;
-      body.appendChild(badgeDiv);
-    }
-
-    // Attach citation pill and copy handlers
-    body.addEventListener('click', (e) => {
-      const pill = e.target.closest('.citation-pill');
-      if (pill) {
-        const idx = pill.getAttribute('data-source-index');
-        const drawer = body.querySelector('.sources-drawer');
-        if (drawer) drawer.open = true;
-        const target = body.querySelector(`#source-card-${idx}`);
-        if (target) {
-          target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          target.classList.add('highlighted');
-          setTimeout(() => target.classList.remove('highlighted'), 2500);
-        }
-      }
-      const copyBtn = e.target.closest('.btn-copy-excerpt');
-      if (copyBtn) {
-        const card = copyBtn.closest('.excerpt-card');
-        const txt = card ? card.querySelector('.excerpt-text')?.innerText : '';
-        if (txt) {
-          navigator.clipboard.writeText(txt);
-          copyBtn.textContent = '✔️ Copied!';
-          setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 2000);
-        }
-      }
-    });
-
-    msgDiv.appendChild(avatar);
-    msgDiv.appendChild(body);
-    if (elements.chatMessages) {
-      elements.chatMessages.appendChild(msgDiv);
-      elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
-    }
-  }
-
-  function createStreamingMessage(citations = [], initialModel = '') {
-    const msgDiv = document.createElement('div');
-    msgDiv.className = 'message system-message streaming-active';
-
-    const avatar = document.createElement('div');
-    avatar.className = 'message-avatar';
-    avatar.textContent = '⚡';
-
-    const body = document.createElement('div');
-    body.className = 'message-body';
-
-    const textContainer = document.createElement('div');
-    textContainer.className = 'streaming-text-container';
-    body.appendChild(textContainer);
-
-    const cursor = document.createElement('span');
-    cursor.className = 'streaming-cursor';
-    body.appendChild(cursor);
-
-    let citationsWrapper = null;
-    if (citations && citations.length > 0) {
-      citationsWrapper = document.createElement('div');
-      citationsWrapper.className = 'citations-wrapper';
-      citationsWrapper.innerHTML = buildExcerptsDrawerHtml(citations);
-      body.appendChild(citationsWrapper);
-    }
-
-    const badgeDiv = document.createElement('div');
-    badgeDiv.style.cssText = 'font-size: 11px; color: #64748b; margin-top: 6px; font-family: monospace; display: flex; align-items: center; gap: 4px; border-top: 1px solid #334155; padding-top: 4px;';
-    badgeDiv.innerHTML = `⚡ Engine Model: <strong style="color:#3b82f6;">${initialModel || state.model}</strong>`;
-    body.appendChild(badgeDiv);
-
-    body.addEventListener('click', (e) => {
-      const pill = e.target.closest('.citation-pill');
-      if (pill) {
-        const idx = pill.getAttribute('data-source-index');
-        const drawer = body.querySelector('.sources-drawer');
-        if (drawer) drawer.open = true;
-        const target = body.querySelector(`#source-card-${idx}`);
-        if (target) {
-          target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          target.classList.add('highlighted');
-          setTimeout(() => target.classList.remove('highlighted'), 2500);
-        }
-      }
-      const copyBtn = e.target.closest('.btn-copy-excerpt');
-      if (copyBtn) {
-        const card = copyBtn.closest('.excerpt-card');
-        const txt = card ? card.querySelector('.excerpt-text')?.innerText : '';
-        if (txt) {
-          navigator.clipboard.writeText(txt);
-          copyBtn.textContent = '✔️ Copied!';
-          setTimeout(() => { copyBtn.textContent = '📋 Copy'; }, 2000);
-        }
-      }
-    });
-
-    msgDiv.appendChild(avatar);
-    msgDiv.appendChild(body);
-    if (elements.chatMessages) {
-      elements.chatMessages.appendChild(msgDiv);
-      elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
-    }
-
-    let accumulated = '';
-    let lastRenderTime = 0;
-
-    return {
-      update: (chunk, fullText) => {
-        accumulated = fullText;
-        const now = Date.now();
-        // Throttle full markdown/KaTeX parsing during rapid streaming tokens for smooth 60fps UI
-        if (now - lastRenderTime > 80) {
-          renderFormattedContent(textContainer, accumulated);
-          lastRenderTime = now;
-          if (elements.chatMessages) elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
-        }
-      },
-      finish: (modelBadge) => {
-        cursor.remove();
-        msgDiv.classList.remove('streaming-active');
-        renderFormattedContent(textContainer, accumulated);
-        if (modelBadge) {
-          badgeDiv.innerHTML = `⚡ Engine Model: <strong style="color:#3b82f6;">${modelBadge}</strong>`;
-        }
-        if (elements.chatMessages) elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
-      },
-      remove: () => {
-        msgDiv.remove();
-      }
-    };
-  }
-
-  function showThinkingIndicator(initialStatus = 'Searching engineering library...') {
-    const msgDiv = document.createElement('div');
-    msgDiv.className = 'message system-message thinking-message';
-    msgDiv.id = 'active-thinking-message';
-
-    const avatar = document.createElement('div');
-    avatar.className = 'message-avatar';
-    avatar.textContent = '⚡';
-
-    const body = document.createElement('div');
-    body.className = 'message-body';
-    body.style.cssText = 'display:flex; align-items:center; gap:8px; color:var(--text-muted, #94a3b8); font-style:italic; font-size:14px;';
-    body.innerHTML = `
-      <span class="spinner" style="display:inline-block; width:14px; height:14px; border:2px solid #3b82f6; border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite;"></span>
-      <span id="thinking-status-text">${initialStatus}</span>
-    `;
-
-    msgDiv.appendChild(avatar);
-    msgDiv.appendChild(body);
-    if (elements.chatMessages) {
-      elements.chatMessages.appendChild(msgDiv);
-      elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
-    }
-
-    return {
-      update: (text) => {
-        const el = document.getElementById('thinking-status-text');
-        if (el) el.textContent = text;
-        if (elements.chatMessages) elements.chatMessages.scrollTop = elements.chatMessages.scrollHeight;
-      },
-      remove: () => {
-        msgDiv.remove();
-      }
-    };
-  }
-
-
-  // --- Event Listeners ---
-
-  function setupEventListeners() {
-    if (elements.btnSettings) {
-      elements.btnSettings.addEventListener('click', () => {
-        elements.apiKeyInput.value = state.apiKey;
-        if (elements.chatModelSelect) elements.chatModelSelect.value = state.model || 'gemini-2.0-flash';
-        if (elements.cloudUrlInput) elements.cloudUrlInput.value = state.cloudUrl;
-        elements.settingsModal.classList.remove('hidden');
-      });
-    }
-
-    const syncModelChange = (val) => {
-      if (!val) return;
-      state.model = val;
-      localStorage.setItem('gemini_model', val);
-      if (elements.chatModelSelect) elements.chatModelSelect.value = val;
-      if (elements.modelSelect) elements.modelSelect.value = val;
-    };
-
-    if (elements.chatModelSelect) {
-      elements.chatModelSelect.addEventListener('change', (e) => syncModelChange(e.target.value));
-    }
-    if (elements.modelSelect) {
-      elements.modelSelect.addEventListener('change', (e) => syncModelChange(e.target.value));
-    }
-
-
-
-
-    if (elements.settingsModal) {
-      const closeBtn = elements.settingsModal.querySelector('.modal-close');
-      if (closeBtn) {
-        closeBtn.addEventListener('click', () => {
-          elements.settingsModal.classList.add('hidden');
-        });
-      }
-    }
-
-    if (elements.btnFetchCloud) {
-      elements.btnFetchCloud.addEventListener('click', async () => {
-        const cloudUrl = elements.cloudUrlInput ? elements.cloudUrlInput.value.trim() : '';
-        state.apiKey = elements.apiKeyInput.value.trim();
-        state.cloudUrl = cloudUrl;
-        localStorage.setItem('gemini_api_key', state.apiKey);
-        localStorage.setItem('cloud_storage_url', cloudUrl);
-
-        if (!cloudUrl) {
-          elements.settingsStatus.className = 'status-msg error';
-          elements.settingsStatus.textContent = 'Please enter a cloud share link or PDF URL.';
-          elements.settingsStatus.classList.remove('hidden');
-          return;
-        }
-
-        await scanGoogleDriveFolder(cloudUrl);
-      });
-    }
-
-    if (elements.btnSelectAllDrive) {
-      elements.btnSelectAllDrive.addEventListener('click', () => {
-        document.querySelectorAll('.drive-file-cb').forEach(cb => cb.checked = true);
-      });
-    }
-
-    if (elements.btnDeselectAllDrive) {
-      elements.btnDeselectAllDrive.addEventListener('click', () => {
-        document.querySelectorAll('.drive-file-cb').forEach(cb => cb.checked = false);
-      });
-    }
-
-    if (elements.btnImportSelectedDrive) {
-      elements.btnImportSelectedDrive.addEventListener('click', async () => {
-        await importSelectedDriveFiles();
-      });
-    }
-
-    if (elements.btnSaveKey) {
-      elements.btnSaveKey.addEventListener('click', async () => {
-        state.apiKey = elements.apiKeyInput.value.trim();
-        if (elements.chatModelSelect) state.model = elements.chatModelSelect.value;
-        state.cloudUrl = elements.cloudUrlInput ? elements.cloudUrlInput.value.trim() : '';
-        localStorage.setItem('gemini_api_key', state.apiKey);
-        localStorage.setItem('gemini_model', state.model);
-        localStorage.setItem('cloud_storage_url', state.cloudUrl);
-        await fetchRepoKB();
-        await discoverUserModels(state.apiKey);
-        elements.settingsStatus.className = 'status-msg success';
-        elements.settingsStatus.textContent = 'Settings saved! Database updated.';
-        elements.settingsStatus.classList.remove('hidden');
-        setTimeout(() => {
-          elements.settingsModal.classList.add('hidden');
-          elements.settingsStatus.classList.add('hidden');
-        }, 1200);
-      });
-    }
-
-
-    if (elements.btnTestKey) {
-      elements.btnTestKey.addEventListener('click', async () => {
-        const testKey = elements.apiKeyInput.value.trim();
-        if (!testKey) {
-          elements.settingsStatus.className = 'status-msg error';
-          elements.settingsStatus.textContent = 'Please enter an API Key to test.';
-          elements.settingsStatus.classList.remove('hidden');
-          return;
-        }
-        elements.settingsStatus.className = 'status-msg';
-        elements.settingsStatus.textContent = 'Discovering models for your account...';
-        elements.settingsStatus.classList.remove('hidden');
-
-        const discovered = await discoverUserModels(testKey);
-        let apiErr = '';
-
-        let chatStatus = false;
-        let embedStatus = false;
-
-        const chatModels = [
-          ...discovered,
-          elements.chatModelSelect?.value,
-          elements.modelSelect?.value,
-          state.model
-        ].filter((m, i, arr) => m && arr.indexOf(m) === i);
-
-
-        let workingChatModel = '';
-
-        for (const cm of chatModels) {
-          try {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${cm}:generateContent`;
-            let res = await fetch(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'x-goog-api-key': testKey },
-              body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Ping' }] }] })
-            });
-
-            if (!res.ok) {
-              res = await fetch(`${url}?key=${testKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'Ping' }] }] })
-              });
-            }
-
-            if (res.ok) {
-              chatStatus = true;
-              workingChatModel = cm;
-              break;
-            } else {
-              const errData = await res.json().catch(() => ({}));
-              apiErr = errData.error?.message || `HTTP ${res.status}`;
-            }
-          } catch (e) {
-            apiErr = e.message;
-          }
-        }
-
-        const embedModels = ['gemini-embedding-2', 'text-embedding-004'];
-        let workingEmbedModel = '';
-
-        for (const em of embedModels) {
-          try {
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${em}:embedContent`;
-            let res = await fetch(url, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'x-goog-api-key': testKey },
-              body: JSON.stringify({ model: `models/${em}`, content: { parts: [{ text: 'Ping' }] } })
-            });
-
-            if (!res.ok) {
-              res = await fetch(`${url}?key=${testKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: `models/${em}`, content: { parts: [{ text: 'Ping' }] } })
-              });
-            }
-
-            if (res.ok) {
-              embedStatus = true;
-              workingEmbedModel = em;
-              break;
-            }
-          } catch (e) {}
-        }
-
-        if (chatStatus) {
-          if (workingChatModel) {
-            state.model = workingChatModel;
-            localStorage.setItem('gemini_model', workingChatModel);
-            if (elements.chatModelSelect) elements.chatModelSelect.value = workingChatModel;
-          }
-          elements.settingsStatus.className = 'status-msg success';
-          elements.settingsStatus.textContent = `✔️ Chat Ready (${workingChatModel}) | ${embedStatus ? `✔️ Embedder Ready (${workingEmbedModel})` : '⚠️ Keyword-Only Retrieval'}`;
-        } else {
-
-          elements.settingsStatus.className = 'status-msg error';
-          elements.settingsStatus.textContent = `❌ API Error: ${apiErr || 'Invalid API Key or network blocked'}. Please check your key at aistudio.google.com.`;
-        }
-      });
-    }
-
-
-    if (elements.btnLibrary) {
-      elements.btnLibrary.addEventListener('click', () => {
-        updateLibraryUI();
-        elements.libraryModal.classList.remove('hidden');
-      });
-    }
-
-    if (elements.libraryModal) {
-      const closeBtn = elements.libraryModal.querySelector('.modal-close');
-      if (closeBtn) {
-        closeBtn.addEventListener('click', () => {
-          elements.libraryModal.classList.add('hidden');
-        });
-      }
-    }
-
-    if (elements.btnUpload && elements.fileInput) {
-      elements.btnUpload.addEventListener('click', () => {
-        elements.fileInput.click();
-      });
-
-      elements.fileInput.addEventListener('change', async (e) => {
-        const files = Array.from(e.target.files);
-        if (!files.length) return;
-
-        renderMessage('assistant', `Uploading and processing ${files.length} document(s)...`);
-        for (const file of files) {
-          try {
-            const docMeta = await processUploadedFile(file);
-            renderMessage('assistant', `✅ Successfully indexed **${docMeta.filename}** (${docMeta.chunkCount} chunks, ${docMeta.pageCount} pages).`);
-          } catch (err) {
-            renderMessage('assistant', `❌ Error indexing ${file.name}: ${err.message}`);
-          }
-        }
-        updateLibraryUI();
-        populateDocScopeSelect();
-        elements.fileInput.value = '';
-      });
-    }
-
-    if (elements.filterPills) {
-      elements.filterPills.forEach((pill) => {
-        pill.addEventListener('click', (e) => {
-          elements.filterPills.forEach((p) => p.classList.remove('active'));
-          e.currentTarget.classList.add('active');
-          state.activeFilter = e.currentTarget.getAttribute('data-filter');
-          if (elements.searchInput && elements.searchInput.value.trim()) {
-            elements.searchInput.dispatchEvent(new Event('input'));
-          }
-        });
-      });
-    }
-
-    if (elements.searchInput) {
-      let searchTimeout;
-      elements.searchInput.addEventListener('input', (e) => {
-        const val = e.target.value.trim();
-        if (val) {
-          elements.searchClearBtn.classList.remove('hidden');
-        } else {
-          elements.searchClearBtn.classList.add('hidden');
-          elements.searchResultsSection.classList.add('hidden');
-          return;
-        }
-
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(async () => {
-          const docScope = elements.docScopeSelect ? elements.docScopeSelect.value : 'all';
-          const results = await performHybridSearch(val, 6, docScope);
-          elements.resultsCount.textContent = results.length;
-          if (results.length === 0) {
-            elements.resultsList.innerHTML = '<p class="result-text">No matching code clauses found.</p>';
-          } else {
-            elements.resultsList.innerHTML = results.map(r => `
-              <div class="result-card">
-                <div class="result-meta">${r.file} — ${r.clause} (Page ${r.page})</div>
-                <div class="result-text">${r.text}</div>
-              </div>
-            `).join('');
-          }
-          elements.searchResultsSection.classList.remove('hidden');
-        }, 300);
-      });
-    }
-
-    if (elements.searchClearBtn) {
-      elements.searchClearBtn.addEventListener('click', () => {
-        elements.searchInput.value = '';
-        elements.searchClearBtn.classList.add('hidden');
-        elements.searchResultsSection.classList.add('hidden');
-      });
-    }
-
-    if (elements.closeResultsBtn) {
-      elements.closeResultsBtn.addEventListener('click', () => {
-        elements.searchResultsSection.classList.add('hidden');
-      });
-    }
-
-    if (elements.btnClearChat) {
-      elements.btnClearChat.addEventListener('click', () => {
-        state.chatHistory = [];
-        if (elements.chatMessages) {
-          elements.chatMessages.innerHTML = '';
-          renderMessage('assistant', '⚡ **New Chat Session Started.** Ask any engineering question or select a specific code from the dropdown below.');
-        }
-      });
-    }
-
-    if (elements.chatInput) {
-      elements.chatInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault();
-          if (elements.chatForm) {
-            elements.chatForm.requestSubmit ? elements.chatForm.requestSubmit() : elements.chatForm.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-          }
-        }
-      });
-    }
-
-    if (elements.chatForm) {
-      elements.chatForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const prompt = elements.chatInput.value.trim();
-        if (!prompt) return;
-
-        elements.chatInput.value = '';
-        renderMessage('user', prompt);
-
-        const useRag = elements.useRagToggle.checked;
-        const docScope = elements.docScopeSelect ? elements.docScopeSelect.value : 'all';
-        let retrieved = [];
-
-        const thinking = showThinkingIndicator(useRag ? '🔍 Searching engineering library & matching clauses...' : '⚡ Connecting to Gemini AI...');
-
-        let streamer = null;
-        try {
-          if (useRag) {
-            retrieved = await performHybridSearch(prompt, 6, docScope);
-            thinking.update(`🧠 Synthesizing with ${state.model || 'Gemini'}... (${retrieved.length} clauses retrieved)`);
-          } else {
-            thinking.update(`🧠 Synthesizing with ${state.model || 'Gemini'}...`);
-          }
-
-          thinking.remove();
-          streamer = createStreamingMessage(retrieved, state.model);
-
-          const res = await streamGeminiChat(prompt, retrieved, docScope, (delta, full) => {
-            if (streamer) streamer.update(delta, full);
-          });
-
-          streamer.finish(res.modelUsed);
-
-          // Retain conversational memory
-          state.chatHistory.push({ role: 'user', content: prompt });
-          state.chatHistory.push({ role: 'assistant', content: res.answer });
-          if (state.chatHistory.length > 16) {
-            state.chatHistory = state.chatHistory.slice(-16);
-          }
-        } catch (err) {
-          thinking.remove();
-          if (streamer) streamer.remove();
-          renderMessage('assistant', `⚠️ **Error**: ${err.message}`);
-        }
-      });
-    }
-
-
-    if (elements.btnExportDb) {
-      elements.btnExportDb.addEventListener('click', () => {
-        const backupData = {
-          documents: state.localDocs,
-          chunks: state.localChunks,
-          exportedAt: new Date().toISOString()
-        };
-        const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `researcher_backup_${Date.now()}.json`;
-        a.click();
-      });
-    }
-
-    if (elements.btnImportDb && elements.importDbInput) {
-      elements.btnImportDb.addEventListener('click', () => {
-        elements.importDbInput.click();
-      });
-
-      elements.importDbInput.addEventListener('change', async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
-        try {
-          const text = await file.text();
-          const data = JSON.parse(text);
-          if (data.documents && data.chunks) {
-            for (const doc of data.documents) {
-              const docChunks = data.chunks.filter((c) => c.docId === doc.id || c.file === doc.filename);
-              await saveLocalDocument(doc, docChunks);
-            }
-            alert('Backup restored successfully!');
-            updateLibraryUI();
-            populateDocScopeSelect();
-          }
-        } catch (err) {
-          alert('Invalid backup file: ' + err.message);
-        }
-      });
-    }
-  }
-
-  async function init() {
-    initElements();
-    setupEventListeners();
-    initIndexedDB();
-    fetchRepoKB();
-    if (state.apiKey) {
-      discoverUserModels(state.apiKey);
-    }
-    console.log('Researcher AI Web App initialized with Selective Checklist UI.');
-  }
-
-  window.addEventListener('DOMContentLoaded', init);
-})();
+  };
+
+  inputEl.oninput = () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+  };
+});
