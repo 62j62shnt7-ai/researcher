@@ -5,3 +5,18 @@ __pycache__/
 researcher.log
 data/
 !data/.gitkeep
+
+# Never upload engineering codes, standards, or PDFs to GitHub
+codes/*
+!codes/README.md
+!codes/.gitkeep
+
+# Prevent accidental commit of document formats
+*.pdf
+*.docx
+*.doc
+*.xlsx
+*.xlsm
+*.pptx
+*.zip
+*.tar.gz
