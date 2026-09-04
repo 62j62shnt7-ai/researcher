@@ -764,15 +764,78 @@ async function streamChatResponse(userPrompt) {
   }
 }
 
-// Markdown renderer with clickable citations
-function renderMarkdown(text) {
-  let html = marked.parse(text);
-  // Turn [1], [2] into anchor citations
+// Markdown renderer with math protection and clickable citations
+function renderMarkdown(rawText) {
+  if (!rawText) return '';
+
+  const mathPlaceholders = [];
+  let placeholderIndex = 0;
+
+  // 1. Extract and render block math ($$ ... $$ or \[ ... \])
+  let protectedText = rawText.replace(/\$\$([\s\S]*?)\$\$|\\\[([\s\S]*?)\\\]/g, (match, p1, p2) => {
+    const math = (p1 !== undefined ? p1 : p2).trim();
+    const token = `@@KATEX_BLOCK_${placeholderIndex++}@@`;
+    let rendered = '';
+    if (window.katex) {
+      try {
+        rendered = window.katex.renderToString(math, {
+          displayMode: true,
+          throwOnError: false
+        });
+      } catch (e) {
+        rendered = `<div class="katex-display katex-error">$$${esc(math)}$$</div>`;
+      }
+    } else {
+      rendered = `<div class="katex-display">$$${esc(math)}$$</div>`;
+    }
+    mathPlaceholders.push({ token, html: rendered, isBlock: true });
+    return `\n\n${token}\n\n`;
+  });
+
+  // 2. Extract and render inline math ($ ... $ or \( ... \))
+  // Avoid capturing simple currency values like $50 or $100.00
+  protectedText = protectedText.replace(/(^|[^\$\w\\])\$([^\$\n]+?)\$(?=[^\$\w]|$)|\\\(([\s\S]*?)\\\)/g, (match, prefix, p1, p2) => {
+    const math = (p1 !== undefined ? p1 : p2).trim();
+    if (!math || /^\d+(?:[.,]\d+)?$/.test(math)) {
+      return match;
+    }
+    const token = `@@KATEX_INL_${placeholderIndex++}@@`;
+    let rendered = '';
+    if (window.katex) {
+      try {
+        rendered = window.katex.renderToString(math, {
+          displayMode: false,
+          throwOnError: false
+        });
+      } catch (e) {
+        rendered = `<span class="katex katex-error">$${esc(math)}$</span>`;
+      }
+    } else {
+      rendered = `<span class="katex">$${esc(math)}$</span>`;
+    }
+    mathPlaceholders.push({ token, html: rendered, isBlock: false });
+    return (prefix || '') + token;
+  });
+
+  // 3. Safe Markdown parsing (underscores & symbols in math won't be mangled)
+  let html = marked.parse(protectedText);
+
+  // 4. Restore rendered math HTML
+  for (const item of mathPlaceholders) {
+    if (item.isBlock) {
+      const blockP = new RegExp(`<p>\\s*${item.token}\\s*<\\/p>`, 'g');
+      html = html.replace(blockP, item.html);
+    }
+    html = html.replace(new RegExp(item.token, 'g'), item.html);
+  }
+
+  // 5. Turn [1], [2] into clickable anchor citations
   html = html.replace(/\[(\d+)\]/g, '<a class="cite" href="#src-$1">[$1]</a>');
+
   return html;
 }
 
-// KaTeX auto-renderer wrapper
+// Fallback auto-renderer wrapper (for any residual DOM elements)
 function renderMathInElement(el) {
   if (window.renderMathInElement) {
     try {
@@ -784,7 +847,7 @@ function renderMathInElement(el) {
         throwOnError: false
       });
     } catch (e) {
-      console.warn('KaTeX render error:', e);
+      // Ignored
     }
   }
 }
