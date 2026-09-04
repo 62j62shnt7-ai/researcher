@@ -10,6 +10,8 @@ on:
       - 'index.html'
       - 'styles.css'
       - 'app.js'
+      - 'requirements.txt'
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
@@ -46,7 +48,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pypdf pdfplumber python-docx openpyxl fastembed
+          pip install pypdf pdfplumber python-docx openpyxl fastembed fonttools
 
 
       - name: Build Knowledge Base Index (Free FastEmbed + Gemini)
