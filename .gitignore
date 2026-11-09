@@ -18,3 +18,8 @@ codes/
 *.pptx
 *.zip
 *.tar.gz
+
+# Local environment files
+.env
+.env.*
+!.env.example
